@@ -20,7 +20,7 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 cp "$KIT_DIR/bench_kaggle.py" "$KIT_DIR/kernel-metadata.json" "$STAGE/"
 python3 - "$STAGE" "$KAGGLE_USER" "$KERNEL_SLUG" "$@" <<'PY'
-import json, re, sys
+import json, os, re, sys
 from pathlib import Path
 
 stage, user, slug, *pairs = sys.argv[1:]
@@ -29,6 +29,9 @@ script = (stage / "bench_kaggle.py").read_text()
 meta = json.loads((stage / "kernel-metadata.json").read_text())
 meta["id"] = f"{user}/{slug}"
 meta["title"] = slug
+# the keys only (upload_secrets.sh of the k1-walk repo); the code comes from git
+secrets = os.environ.get("SECRETS_DATASET", f"{user}/k1-secrets")
+meta["dataset_sources"] = [secrets] if secrets else []
 for pair in pairs:
     key, value = pair.split("=", 1)
     line = re.search(rf"^{key} = (.*?)(\s+#.*)?$", script, re.M)

@@ -1,7 +1,8 @@
 """Speed of the pH plant on a T4 GPU, next to MJX on the same GPU (Kaggle kernel or Colab notebook).
 
 The code comes from git: this repo (akuduku/K1-Full-Body-pH, private) is cloned at BRANCH with the
-GITHUB_TOKEN secret (Kaggle: Add-ons > Secrets; Colab: the key icon; or an environment variable).
+GITHUB_TOKEN (Kaggle: the private dataset <user>/k1-secrets, attached by run.sh; Colab: the key icon;
+or an environment variable).
 Push your changes before you start a run: the kernel sees only what is on GitHub.
 
 Everything worth keeping lands in WORK (on Kaggle /kaggle/working, the kernel output):
@@ -75,10 +76,24 @@ def sh(cmd, log, cwd=None, env=None, check=True):
     return code
 
 
+def secrets_file():
+    """The keys file of the attached private dataset <user>/k1-secrets (see kaggle/upload_secrets.sh)."""
+    import glob
+    import json
+    for path in sorted(glob.glob("/kaggle/input/**/k1_secrets.json", recursive=True)):
+        try:
+            return json.loads(Path(path).read_text())
+        except (OSError, ValueError):
+            pass
+    return {}
+
+
 def secret(name):
-    """A secret from the environment, Kaggle Secrets or Colab Secrets (None when none has it)."""
+    """A secret from the environment, the private dataset k1-secrets, Kaggle Secrets or Colab Secrets."""
     if os.environ.get(name):
         return os.environ[name]
+    if secrets_file().get(name):
+        return secrets_file()[name]
     try:
         from kaggle_secrets import UserSecretsClient
         return UserSecretsClient().get_secret(name)
@@ -138,8 +153,8 @@ def clone_source():
     if REPO.startswith("https://github.com/"):
         token = secret("GITHUB_TOKEN")
         if not token:
-            raise SystemExit("GITHUB_TOKEN missing: the repo is private. Kaggle: Edit > Add-ons > Secrets > add "
-                             "GITHUB_TOKEN and tick it for this notebook. Colab: key icon > GITHUB_TOKEN.")
+            raise SystemExit("GITHUB_TOKEN missing: the repo is private. Kaggle: run upload_secrets.sh of the "
+                             "k1-walk repo once (private dataset <user>/k1-secrets). Colab: key icon > GITHUB_TOKEN.")
         env["GITHUB_TOKEN"] = token
     helper = "!f() { echo username=x-access-token; echo \"password=$GITHUB_TOKEN\"; }; f"
     code = sh(["git", "-c", "credential.helper=", "-c", f"credential.helper={helper}", "clone", "--depth", "1",
