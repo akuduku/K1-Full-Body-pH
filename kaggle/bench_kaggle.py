@@ -86,8 +86,15 @@ def secret(name):
         pass
     except Exception as exc:  # Kaggle's reason, never the value
         cause = exc.__cause__ or exc.__context__
+        body = ""
+        if cause is not None and hasattr(cause, "read"):  # Kaggle's error text (no value: the request failed)
+            try:
+                body = cause.read().decode(errors="replace")[:400]
+            except Exception:
+                pass
         print(f"secret {name} not available from Kaggle: {type(exc).__name__}: {str(exc)[:300]}"
-              + (f" <- {type(cause).__name__}: {str(cause)[:300]}" if cause else ""), flush=True)
+              + (f" <- {type(cause).__name__}: {str(cause)[:300]}" if cause else "")
+              + (f" | response: {body}" if body else ""), flush=True)
     try:
         from google.colab import userdata
         return userdata.get(name)
