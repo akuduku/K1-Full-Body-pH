@@ -93,6 +93,20 @@ def secret(name):
         return None
 
 
+def network_report():
+    """Can this session reach GitHub, PyPI and the Kaggle secret service? Logged at the start of a run."""
+    import socket
+    out = []
+    for host in ("github.com", "pypi.org"):
+        try:
+            socket.create_connection((host, 443), timeout=5).close()
+            out.append(f"{host}: ok")
+        except OSError as exc:
+            out.append(f"{host}: NO ({type(exc).__name__})")
+    out.append("secret service token: " + ("present" if os.environ.get("KAGGLE_USER_SECRETS_TOKEN") else "MISSING"))
+    return "network: " + ", ".join(out)
+
+
 def clone_source():
     """git clone --depth 1 of REPO at BRANCH into SRC -> True on success. The token goes through a
     credential helper that reads it from the environment, so it is never on a command line or in a log."""
@@ -179,6 +193,7 @@ def main():
     settings = {k: globals()[k] for k in SETTINGS}
     print(json.dumps(settings), flush=True)
     gpu = sh(["nvidia-smi"], "install", check=False) == 0
+    print(network_report(), flush=True)
     cloned = clone_source()
     py = sys.executable
     installed = cloned and sh([py, "-m", "pip", "install", "-q", "mujoco"], "install", check=False) == 0
