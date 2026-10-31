@@ -85,7 +85,9 @@ def secret(name):
     except ImportError:
         pass
     except Exception as exc:  # Kaggle's reason, never the value
-        print(f"secret {name} not available from Kaggle: {type(exc).__name__}: {str(exc)[:300]}", flush=True)
+        cause = exc.__cause__ or exc.__context__
+        print(f"secret {name} not available from Kaggle: {type(exc).__name__}: {str(exc)[:300]}"
+              + (f" <- {type(cause).__name__}: {str(cause)[:300]}" if cause else ""), flush=True)
     try:
         from google.colab import userdata
         return userdata.get(name)
@@ -104,6 +106,18 @@ def network_report():
         except OSError as exc:
             out.append(f"{host}: NO ({type(exc).__name__})")
     out.append("secret service token: " + ("present" if os.environ.get("KAGGLE_USER_SECRETS_TOKEN") else "MISSING"))
+    from urllib.parse import urlparse
+    for var in ("KAGGLE_URL_BASE", "KAGGLE_DATA_PROXY_URL"):  # service addresses, not secrets
+        url = os.environ.get(var)
+        if not url:
+            out.append(f"{var}: unset")
+            continue
+        u = urlparse(url)
+        try:
+            socket.create_connection((u.hostname, u.port or (443 if u.scheme == "https" else 80)), timeout=5).close()
+            out.append(f"{var}={u.scheme}://{u.hostname}: ok")
+        except OSError as exc:
+            out.append(f"{var}={u.scheme}://{u.hostname}: NO ({type(exc).__name__})")
     return "network: " + ", ".join(out)
 
 
