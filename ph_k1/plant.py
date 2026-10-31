@@ -137,7 +137,7 @@ class K1PHPlant:
             pose = HOME_POSE
         theta = pose if isinstance(pose, torch.Tensor) else m.pose_vector(pose)
         q = torch.zeros(B, NQ, dtype=self.dtype, device=self.device)
-        q[:, 3:7] = torch.tensor(base_quat, dtype=self.dtype)
+        q[:, 3:7] = torch.tensor(base_quat, dtype=self.dtype, device=self.device)
         q[:, 7:] = theta
         x, y, z = base_pos
         q[:, 0], q[:, 1] = x, y
@@ -184,17 +184,18 @@ class K1PHPlant:
         nu = self.velocity(kin)
         c, lim, m = self.contact, self.limits, self.model
         out = {"kinetic": 0.5 * (self.p * nu).sum(-1)}
-        out["gravity"] = gravity_potential(m, kin) if self.gravity else torch.zeros(self.B, dtype=self.dtype)
+        zeros_b = torch.zeros(self.B, dtype=self.dtype, device=self.device)
+        out["gravity"] = gravity_potential(m, kin) if self.gravity else zeros_b
         if c.enabled and not self.fixed_base:
             delta = (-self._sole_points(kin)[..., 2]).clamp_min(0)
             out["contact"] = 0.5 * c.k_n * (delta**2).sum(-1) + 0.5 * c.k_t * (self.xi**2).sum((-1, -2))
         else:
-            out["contact"] = torch.zeros(self.B, dtype=self.dtype)
+            out["contact"] = zeros_b
         if lim.enabled:
             over = (self.theta - m.jnt_high).clamp_min(0) + (m.jnt_low - self.theta).clamp_min(0)
             out["stops"] = 0.5 * lim.k * (over**2).sum(-1)
         else:
-            out["stops"] = torch.zeros(self.B, dtype=self.dtype)
+            out["stops"] = zeros_b
         out["coil"] = (self.lam**2 / (2 * self.motors.L)).sum(-1)
         out["total"] = sum(out[k] for k in ("kinetic", "gravity", "contact", "stops", "coil"))
         return out
@@ -276,7 +277,7 @@ class K1PHPlant:
             nu0 = torch.cholesky_solve(b1[..., None], Lc).squeeze(-1)
             E = torch.zeros(B, len(f), NJ, dtype=self.dtype, device=self.device)
             jr = self.jrows  # hinge positions inside the free dofs
-            E[:, jr, torch.arange(NJ)] = 1.0
+            E[:, jr, torch.arange(NJ, device=self.device)] = 1.0
             Y = torch.cholesky_solve(E, Lc)  # A^-1 B
             Mj = Y[:, jr]  # B^T A^-1 B
             Ksys = torch.diag_embed(mot.L + h * mot.R) + h * h * Ks[:, :, None] * Mj * Ks[:, None, :]

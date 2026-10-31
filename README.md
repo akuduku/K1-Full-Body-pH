@@ -151,7 +151,9 @@ plant.ph_matrices()                   # explicit J, D, G, ∇H for robot 0
 | `ph_k1/render.py` | Viewer (drawing only) and energy-tank plots |
 | `checks.py` | Validation suite |
 | `play_volts.py`, `hold_pose.py` | Hand-commanded experiments |
-| `assets/K1/` | Booster K1 MJCF and meshes |
+| `assets/K1/` | Booster K1 MJCF and meshes; `K1_22dof_mjx_prims.xml` = primitive collisions for MJX |
+| `benchmarks/` | Speed of the plant (`benchmark_ph.py`) and of MJX on the same robot (`benchmark_mjx.py`) |
+| `kaggle/`, `colab/` | The same benchmarks on a T4 GPU (Kaggle kernel / Colab notebook; both clone this repo) |
 | `docs/` | Figures and notes |
 
 The plant is batched: N robots step in parallel in PyTorch. Measured on CPU: about
