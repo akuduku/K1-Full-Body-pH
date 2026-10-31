@@ -82,8 +82,10 @@ def secret(name):
     try:
         from kaggle_secrets import UserSecretsClient
         return UserSecretsClient().get_secret(name)
-    except Exception:
+    except ImportError:
         pass
+    except Exception as exc:  # Kaggle's reason, never the value
+        print(f"secret {name} not available from Kaggle: {type(exc).__name__}: {str(exc)[:300]}", flush=True)
     try:
         from google.colab import userdata
         return userdata.get(name)
