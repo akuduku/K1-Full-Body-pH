@@ -403,8 +403,10 @@ def test_gain_line_matches_reference(model64):
         kp = kp0 * torch.exp(0.8 * torch.randn(3, NJ, dtype=torch.float64, device=DEVICE))
         kd = kd0 * torch.exp(0.8 * torch.randn(3, NJ, dtype=torch.float64, device=DEVICE))
         a, b = ref.policy_step(target, kp=kp, kd=kd), nat.policy_step(target, kp=kp, kd=kd)
-        same_state(py, nat, 1e-8, f"gain line, policy step {it}")
-        _same_command_state(ref, nat, a, b, 1e-8, "gain line")
+        # gains x0.1..x10 switching every step make the motors stiff: on a GPU (other summation order) torques of
+        # tens of N m differ by ~1e-7 (1e-9 relative); on the CPU it agrees to round-off
+        same_state(py, nat, 1e-6, f"gain line, policy step {it}")
+        _same_command_state(ref, nat, a, b, 1e-6, "gain line")
 
 
 @pytest.mark.parametrize("delay_gains", [True, False])
