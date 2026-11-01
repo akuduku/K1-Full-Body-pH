@@ -13,3 +13,13 @@ logs/
 wandb/
 # colab-train's local state (rendered notebooks, browser screenshots)
 .colab-train/
+# LaTeX build files
+*.aux
+*.nav
+*.snm
+*.toc
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+docs/presentation/*.log

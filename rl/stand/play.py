@@ -55,10 +55,11 @@ def newest_policy() -> Path | None:
 
 
 def mouse_force(active: int, body: int | None, refpos, localpos, kin, mass_on_body: float, stiffness: float,
-                scale: float, nu: torch.Tensor):
+                scale: float, nu: torch.Tensor, max_force: float = float("inf")):
     """MuJoCo's mouse spring on the pH plant: world force f on the selected body point and the generalised force
-    J^T f (1, 28).  f = scale * m * (k (refpos - x) - 2 sqrt(k) v_x)  (spring + critical damping per unit mass).
-    Returns (f (3,), gen_force (1,28) or None, x (3,))."""
+    J^T f (1, 28).  f = scale * m * (k (refpos - x) - 2 sqrt(k) v_x)  (spring + critical damping per unit mass),
+    at most scale * max_force [N] (the mass hanging on the trunk is the whole robot: a long drag would otherwise
+    ask for kilonewtons, held for a 20 ms policy step).  Returns (f (3,), gen_force (1,28) or None, x (3,))."""
     if body is None or not (active & 1) or scale <= 0:
         return np.zeros(3), None, None
     R, P = kin.R[0, body], kin.pos[0, body]
@@ -68,6 +69,9 @@ def mouse_force(active: int, body: int | None, refpos, localpos, kin, mass_on_bo
     v = (J @ nu[..., None]).squeeze(-1)[0]
     ref = torch.as_tensor(np.asarray(refpos, dtype=np.float64), dtype=R.dtype)
     f = scale * mass_on_body * (stiffness * (ref - x) - 2.0 * math.sqrt(stiffness) * v)
+    n = float(f.norm())
+    if n > scale * max_force:
+        f = f * (scale * max_force / n)
     gen = (J.transpose(1, 2) @ f[:, None]).squeeze(-1)
     return f.numpy(), gen, x.numpy()
 
@@ -79,6 +83,7 @@ def main():
     ap.add_argument("--seconds", type=float, default=0.0, help="0: until a window is closed")
     ap.add_argument("--window", type=float, default=10.0, help="seconds shown in the plot")
     ap.add_argument("--strength", type=float, default=1.0, help="start value of the push-strength slider")
+    ap.add_argument("--max-force", type=float, default=100.0, help="largest push at strength x1 [N]")
     ap.add_argument("--no-viewer", action="store_true", help="headless: scripted pushes on the trunk, plot to a PNG")
     ap.add_argument("--test-force", type=float, default=60.0, help="headless: N of the scripted pushes")
     args = ap.parse_args()
@@ -177,8 +182,13 @@ def main():
                 if sel > 0:
                     name = mujoco.mj_id2name(mj, mujoco.mjtObj.mjOBJ_BODY, sel)
                     body = model.body_names.index(name) if name in model.body_names else None
+                if (sel, active) != state.get("mouse"):  # tell what the mouse does (select / pull / release)
+                    state["mouse"] = (sel, active)
+                    what = mujoco.mj_id2name(mj, mujoco.mjtObj.mjOBJ_BODY, sel) if sel > 0 else "nothing"
+                    print(f"[play] t={t:.1f} s mouse: selected {what}, "
+                          f"{'PULLING' if active & 1 else ('rotating' if active & 2 else 'not pulling')}", flush=True)
                 f, gen, _ = mouse_force(active, body, refpos, localpos, kin, subtree.get(body, 0.0) if body is not None else 0.0,
-                                        stiffness, float(slider.val), state["nu"])
+                                        stiffness, float(slider.val), state["nu"], args.max_force)
             elif t % 3.0 >= 1.5 and t % 3.0 < 1.65:  # every 3 s a 150 ms pull of --test-force N on the trunk
                 ang = 1.3 * int(t // 3.0)
                 f_w = slider.val * args.test_force * torch.tensor([math.cos(ang), math.sin(ang), 0.0], dtype=torch.float64)
@@ -193,6 +203,11 @@ def main():
             state["qd"], state["gyro"] = state["nu"][:, NB:].clone(), info.extra["gyro"].clone()
             t += dt
             it += 1
+
+            if not (torch.isfinite(plant.q).all() and torch.isfinite(plant.p).all()):
+                print(f"[play] t={t:.1f} s the state blew up (push too hard): reset", flush=True)
+                state["reset"] = True
+                continue
 
             rp = con.roll_pitch(plant.q[:, 3:7])[0].abs()
             fallen = float(rp.max()) > C.TILT_ABORT
@@ -217,8 +232,8 @@ def main():
                 for k in TANKS:
                     lines[k].set_data(ts, list(hist[k]))
                 ax.set_xlim(max(0.0, t - args.window), max(args.window, t))
-                lo = min(min(hist[k]) for k in TANKS)
-                hi = max(max(hist[k]) for k in TANKS)
+                vals = [v for k in TANKS for v in hist[k] if math.isfinite(v)] or [0.0]
+                lo, hi = min(vals), max(vals)
                 ax.set_ylim(lo - 0.05 * (hi - lo + 1e-3) - 0.05, hi + 0.15 * (hi - lo + 1e-3) + 0.05)
                 led = plant.ledger
                 info_text.set_text(f"push {np.linalg.norm(f):6.1f} N   push work {float(led.mech_input[0]):7.2f} J\n"
