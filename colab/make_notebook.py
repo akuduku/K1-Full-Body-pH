@@ -57,7 +57,7 @@ print("results ->", OUT)
 
 CELL_CLONE = r'''
 #@title 2. Clone the code from GitHub (needs the Colab Secret GITHUB_TOKEN)
-BRANCH = "kaggle-bench"  #@param {type:"string"}
+BRANCH = "native-cuda"  #@param {type:"string"}
 REPO = os.environ.get("BENCH_REPO", "https://github.com/akuduku/K1-Full-Body-pH.git")
 SRC = ROOT / "phbench"
 env = dict(os.environ)

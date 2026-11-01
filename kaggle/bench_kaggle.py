@@ -1,4 +1,5 @@
-"""Speed of the pH plant on a T4 GPU, next to MJX on the same GPU (Kaggle kernel or Colab notebook).
+"""The pH plant on a T4 GPU (Kaggle kernel or Colab notebook): the C++/CUDA plant is built, tested against
+the Python one and benchmarked next to the PyTorch plant and MJX; a video of the servo hold + push goes to W&B.
 
 The code comes from git: this repo (akuduku/K1-Full-Body-pH, private) is cloned at BRANCH with the
 GITHUB_TOKEN (Kaggle: the private dataset <user>/k1-secrets, attached by run.sh; Colab: the key icon;
@@ -6,9 +7,10 @@ or an environment variable).
 Push your changes before you start a run: the kernel sees only what is on GitHub.
 
 Everything worth keeping lands in WORK (on Kaggle /kaggle/working, the kernel output):
-  results/ph_cuda.json, results/ph_cpu.json, results/mjx.json   raw numbers
-  logs/*.log                                                     full output of every step
-  summary.txt / summary.json                                     the comparison table
+  results/ph_*.json, results/mjx.json        raw numbers (ph_native_* = the C++/CUDA plant)
+  logs/*.log                                 full output of every step (native_build, native_tests, ...)
+  videos/hold_push.mp4                       servo hold + push on the native plant (also on W&B)
+  summary.txt / summary.json                 the comparison table
 run.sh overrides the settings below in the copy it pushes. Elsewhere (the Colab notebook,
 a local test) environment variables do: BENCH_WORK, BENCH_SRC for the paths, BENCH_REPO for
 the repo URL (a local path works too) and BENCH_<SETTING> (e.g. BENCH_BATCHES=4) for any setting.
@@ -31,9 +33,14 @@ CPU_REF = True                   # same benchmark on Kaggle's CPU, small batches
 MJX = True                       # MJX reference on the same GPU (separate venv)
 MJX_BATCHES = "1024,4096,8192"
 MJX_TIMESTEPS = "0.005,0.001"    # 5 ms = what RL_Core trains with, 1 ms = the pH plant's step
+NATIVE = True                    # build + test + benchmark the C++/CUDA plant (Physik C++)
+NATIVE_BATCHES = "256,1024,4096,8192,16384"
+VIDEO = True                     # servo hold + push video of the native plant, to W&B if WANDB_API_KEY is set
+WANDB_ENTITY = "karl-jahnel-universit-t-leipzig"
+WANDB_PROJECT = "Akos pH"
 
 SETTINGS = ("BRANCH", "BATCHES", "DTYPES", "ITERS", "HOLD_S", "PROFILE_BATCH", "CPU_REF", "MJX", "MJX_BATCHES",
-            "MJX_TIMESTEPS")
+            "MJX_TIMESTEPS", "NATIVE", "NATIVE_BATCHES", "VIDEO", "WANDB_ENTITY", "WANDB_PROJECT")
 for _key in SETTINGS:  # BENCH_<SETTING> overrides, cast to the default's type
     _val = os.environ.get(f"BENCH_{_key}")
     if _val is not None:
@@ -174,6 +181,7 @@ def load(path):
 def summarize():
     """One table: best pH number per batch vs MJX at 5 ms and 1 ms."""
     ph, cpu, mjx = load(RESULTS / "ph_cuda.json"), load(RESULTS / "ph_cpu.json"), load(RESULTS / "mjx.json")
+    nat, nat_cpu = load(RESULTS / "ph_native_cuda.json"), load(RESULTS / "ph_native_cpu.json")
     lines = []
     if ph:
         lines.append(f"GPU: {ph.get('gpu')}   torch {ph.get('torch')}")
@@ -181,8 +189,8 @@ def summarize():
         lines.append(f"MJX: jax {mjx.get('jax')}  mujoco {mjx.get('mujoco')}  model {mjx.get('xml')}")
     lines.append("")
     lines.append("policy steps/s (50 Hz policy, all robots together; higher is better)")
-    lines.append(f"{'batch':>6} {'pH f32':>10} {'pH f64':>10} {'MJX 5ms':>10} {'MJX 1ms':>10} "
-                 f"{'MJX5/pH':>8} {'MJX1/pH':>8} {'pH: 1e8 steps':>14}")
+    lines.append(f"{'batch':>6} {'torch f32':>10} {'C++ f32':>10} {'C++ f64':>10} {'MJX 5ms':>10} {'MJX 1ms':>10} "
+                 f"{'C++/torch':>9} {'MJX5/C++':>9} {'MJX1/C++':>9} {'C++: 1e8 steps':>15}")
 
     def sps(rows, **match):
         for r in rows or []:
@@ -190,24 +198,32 @@ def summarize():
                 return r["policy_steps_per_s"]
         return None
 
-    batches = sorted({r["batch"] for src in (ph, mjx) if src for r in src["speed"] if "batch" in r})
+    batches = sorted({r["batch"] for src in (ph, mjx, nat) if src for r in src["speed"] if "batch" in r})
     best = None
     for B in batches:
-        p32 = sps(ph and ph["speed"], batch=B, dtype="float32")
-        p64 = sps(ph and ph["speed"], batch=B, dtype="float64")
+        t32 = sps(ph and ph["speed"], batch=B, dtype="float32")
+        n32 = sps(nat and nat["speed"], batch=B, dtype="float32")
+        n64 = sps(nat and nat["speed"], batch=B, dtype="float64")
         m5 = sps(mjx and mjx["speed"], batch=B, timestep=0.005)
         m1 = sps(mjx and mjx["speed"], batch=B, timestep=0.001)
-        p = max([x for x in (p32, p64) if x] or [0]) or None
-        if p and (best is None or p > best[1]):
-            best = (B, p)
+        if n32 and (best is None or n32 > best[1]):
+            best = (B, n32)
         f = lambda x: f"{x:>10.0f}" if x else f"{'-':>10}"  # noqa: E731
-        r = lambda a, b: f"{a / b:>7.0f}x" if a and b else f"{'-':>8}"  # noqa: E731
-        eta = f"{1e8 / p / 3600:>12.1f} h" if p else f"{'-':>14}"
-        lines.append(f"{B:>6} {f(p32)} {f(p64)} {f(m5)} {f(m1)} {r(m5, p)} {r(m1, p)} {eta}")
+        r = lambda a, b: f"{a / b:>8.1f}x" if a and b else f"{'-':>9}"  # noqa: E731
+        eta = f"{1e8 / n32 / 3600:>13.1f} h" if n32 else f"{'-':>15}"
+        lines.append(f"{B:>6} {f(t32)} {f(n32)} {f(n64)} {f(m5)} {f(m1)} {r(n32, t32)} {r(m5, n32)} {r(m1, n32)} {eta}")
     if best:
         lines.append("")
-        lines.append(f"best pH: {best[1]:.0f} policy steps/s at batch {best[0]} "
+        lines.append(f"best C++ plant: {best[1]:.0f} policy steps/s at batch {best[0]} (float32) "
                      f"-> 1e8 steps in {1e8 / best[1] / 3600:.1f} h")
+    if nat_cpu:
+        c = max((r.get("policy_steps_per_s", 0) for r in nat_cpu["speed"]), default=0)
+        lines.append(f"C++ plant on this machine's CPU ({nat_cpu.get('threads')} threads): best {c:.0f} policy steps/s")
+    for name in ("native_build", "native_tests"):
+        log = LOGS / f"{name}.log"
+        if log.exists():
+            tail = [l for l in log.read_text().splitlines() if l.strip()][-1:]
+            lines.append(f"{name}: {tail[0][:160] if tail else '(empty)'}")
     if cpu:
         c = max((r.get("policy_steps_per_s", 0) for r in cpu["speed"]), default=0)
         lines.append(f"pH on this machine's CPU ({cpu.get('threads')} threads): best {c:.0f} policy steps/s")
@@ -219,8 +235,8 @@ def summarize():
     text = "\n".join(lines)
     print("\n" + text, flush=True)
     (WORK / "summary.txt").write_text(text + "\n")
-    (WORK / "summary.json").write_text(json.dumps({"ph_cuda": ph, "ph_cpu": cpu, "mjx": mjx,
-                                                   "timings": timings}, indent=2) + "\n")
+    (WORK / "summary.json").write_text(json.dumps({"ph_cuda": ph, "ph_cpu": cpu, "mjx": mjx, "native_cuda": nat,
+                                                   "native_cpu": nat_cpu, "timings": timings}, indent=2) + "\n")
 
 
 def main():
@@ -232,7 +248,8 @@ def main():
     print(network_report(), flush=True)
     cloned = clone_source()
     py = sys.executable
-    installed = cloned and sh([py, "-m", "pip", "install", "-q", "mujoco"], "install", check=False) == 0
+    installed = cloned and sh([py, "-m", "pip", "install", "-q", "mujoco", "imageio", "imageio-ffmpeg", "pytest",
+                               "wandb"], "install", check=False) == 0
     if not (gpu and cloned and installed):
         # Kaggle silently gives a CPU-only, offline session when the account may not use GPU/internet
         log = (LOGS / "install.log").read_text()
@@ -258,7 +275,21 @@ def main():
     bench = SRC / "benchmarks" / "benchmark_ph.py"
     ph_path = SRC
     common = [py, bench, "--ph-path", ph_path, "--iters", ITERS]
-    # 1. the number that matters: pH plant on the GPU, big batches, both float types
+    # 0. the C++/CUDA plant: build (CUDA required), test against the Python plant on the GPU, benchmark
+    built = False
+    if NATIVE:
+        built = sh([py, "setup.py", "build_ext", "--inplace"], "native_build", cwd=SRC / "Physik C++",
+                   env={"PH_K1_CUDA": os.environ.get("PH_K1_CUDA", "1")}, check=False) == 0
+        if built:
+            sh([py, "-m", "pytest", SRC / "Physik C++" / "tests", "-q", "-p", "no:cacheprovider"], "native_tests",
+               cwd=SRC, env={"PH_TEST_DEVICE": "cuda"}, check=False)
+            sh(common + ["--impl", "native", "--device", "cuda", "--batches", NATIVE_BATCHES, "--dtypes", DTYPES,
+                         "--hold-s", HOLD_S, "--json", RESULTS / "ph_native_cuda.json"], "ph_native_cuda", check=False)
+            sh(common + ["--impl", "native", "--device", "cpu", "--batches", "64,256,1024", "--dtypes", "float32",
+                         "--hold-s", 0, "--json", RESULTS / "ph_native_cpu.json"], "ph_native_cpu", check=False)
+        else:
+            print("native build failed; see logs/native_build.log", flush=True)
+    # 1. the PyTorch plant on the GPU, big batches, both float types
     sh(common + ["--device", "cuda", "--batches", BATCHES, "--dtypes", DTYPES, "--hold-s", HOLD_S,
                  "--json", RESULTS / "ph_cuda.json"], "ph_cuda", check=False)
     # 2. where the GPU time goes
@@ -283,6 +314,21 @@ def main():
         else:
             print("MJX install failed; see logs/mjx_install.log", flush=True)
     summarize()
+    # 5. video of the native plant (servo hold + push), to W&B when a key is available
+    if VIDEO and built:
+        cmd = [py, SRC / "benchmarks" / "servo_video.py", "--device", "cuda", "--out", WORK / "videos" / "hold_push.mp4",
+               "--summary", WORK / "summary.json"]
+        env = {}
+        key = secret("WANDB_API_KEY")
+        if key:
+            cmd += ["--wandb-project", WANDB_PROJECT, "--wandb-entity", WANDB_ENTITY]
+            env["WANDB_API_KEY"] = key
+        else:
+            print("no WANDB_API_KEY: the video stays in videos/ only", flush=True)
+        ok = sh(cmd, "video", env={**env, "MUJOCO_GL": "egl", "PYOPENGL_PLATFORM": "egl"}, check=False) == 0
+        if not ok and not (WORK / "videos" / "hold_push.mp4").exists():  # no EGL: software rendering
+            sh(["bash", "-c", "apt-get install -y -qq libosmesa6 > /dev/null 2>&1 || true"], "video", check=False)
+            sh(cmd, "video", env={**env, "MUJOCO_GL": "osmesa", "PYOPENGL_PLATFORM": "osmesa"}, check=False)
 
 
 if __name__ == "__main__":

@@ -34,13 +34,15 @@ import torch
 DEFAULT_PH_PATH = Path(__file__).resolve().parents[1]  # the repo root, which holds ph_k1/
 
 
-def _import_ph(ph_path: Path):
+def _import_ph(ph_path: Path, impl: str = "torch"):
     sys.path.insert(0, str(ph_path))
     from ph_k1.drive import K1Drive
     from ph_k1.model import load_k1
     from ph_k1.plant import K1PHPlant
 
-    return K1PHPlant, K1Drive, load_k1
+    if impl == "native":  # the C++/CUDA plant ("Physik C++"), built with setup.py build_ext --inplace
+        from ph_k1.native import K1PHPlantNative as K1PHPlant
+    return K1PHPlant, K1Drive, load_k1, impl
 
 
 def _sync(device: str):
@@ -48,36 +50,49 @@ def _sync(device: str):
         torch.cuda.synchronize()
 
 
+class Runner:
+    """One policy step = servo (target -> volts) + `substeps` plant steps.  torch: K1Drive + K1PHPlant.step
+    in Python; native: K1PHPlantNative.policy_step, the whole policy step in one C++/CUDA call."""
+
+    def __init__(self, plant, drive, gain, native):
+        self.plant, self.drive, self.gain, self.native = plant, drive, gain, native
+
+    def policy_step(self, target, substeps):
+        if self.native:
+            self.plant.policy_step(target, substeps, gain_scale=self.gain)
+        else:
+            for _ in range(substeps):
+                self.plant.step(self.drive.volts(target))
+
+
 def build(ph, batch: int, dtype: torch.dtype, device: str, timestep: float, gain: float = 1.0):
-    K1PHPlant, K1Drive, load_k1 = ph
+    K1PHPlant, K1Drive, load_k1, impl = ph
     model = load_k1(dtype=dtype, device=device)
     plant = K1PHPlant(model=model, batch=batch, timestep=timestep)
     drive = K1Drive(plant, gain_scale=gain)
     drive.reset()
-    return plant, drive
+    return Runner(plant, drive, gain, impl == "native")
 
 
-def time_policy_steps(plant, drive, substeps: int, warmup: int, iters: int, device: str):
-    target = plant.theta.clone()
+def time_policy_steps(run, substeps: int, warmup: int, iters: int, device: str):
+    target = run.plant.theta.clone()
     for _ in range(warmup):
-        for _ in range(substeps):
-            plant.step(drive.volts(target))
+        run.policy_step(target, substeps)
     _sync(device)
     t0 = time.perf_counter()
     for _ in range(iters):
-        for _ in range(substeps):
-            plant.step(drive.volts(target))
+        run.policy_step(target, substeps)
     _sync(device)
     return (time.perf_counter() - t0) / iters  # seconds per policy step
 
 
-def hold_quality(plant, drive, seconds: float):
+def hold_quality(run, seconds: float, substeps: int):
     """Hold the stand pose; return trunk z, max tilt and the ledger residual."""
+    plant = run.plant
     target = plant.theta.clone()
     H0 = plant.energy()["total"].clone()
-    n = int(round(seconds / plant.h))
-    for _ in range(n):
-        plant.step(drive.volts(target))
+    for _ in range(max(1, int(round(seconds / (plant.h * substeps))))):
+        run.policy_step(target, substeps)
     H1 = plant.energy()["total"]
     led = plant.ledger
     residual = (H1 - H0) - (led.supplied - led.dissipated)
@@ -96,6 +111,8 @@ def hold_quality(plant, drive, seconds: float):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ph-path", type=Path, default=DEFAULT_PH_PATH, help="folder that contains ph_k1/")
+    ap.add_argument("--impl", choices=("torch", "native"), default="torch",
+                    help="torch: ph_k1/plant.py; native: the C++/CUDA plant (Physik C++)")
     ap.add_argument("--batches", default="1,16,64,256,1024")
     ap.add_argument("--dtypes", default="float64,float32")
     ap.add_argument("--device", default="cpu")
@@ -117,46 +134,45 @@ def main():
 
     if args.threads:
         torch.set_num_threads(args.threads)
-    ph = _import_ph(args.ph_path)
+    ph = _import_ph(args.ph_path, args.impl)
     substeps = int(round(args.policy_dt / args.timestep))
     batches = [int(b) for b in args.batches.split(",")]
     dtypes = [getattr(torch, d) for d in args.dtypes.split(",")]
 
     gpu = torch.cuda.get_device_name(0) if args.device.startswith("cuda") else None
-    report = {"torch": torch.__version__, "device": args.device, "gpu": gpu, "cpu": platform.processor(),
+    report = {"impl": args.impl, "torch": torch.__version__, "device": args.device, "gpu": gpu, "cpu": platform.processor(),
               "threads": torch.get_num_threads(), "timestep": args.timestep, "substeps": substeps,
               "speed": [], "quality": []}
-    print(f"torch {torch.__version__}  device={args.device}{f' ({gpu})' if gpu else ''}  "
+    print(f"impl={args.impl}  torch {torch.__version__}  device={args.device}{f' ({gpu})' if gpu else ''}  "
           f"threads={torch.get_num_threads()}  plant dt={args.timestep * 1e3:.1f} ms  "
           f"substeps/policy step={substeps}")
 
     if args.profile:
-        plant, drive = build(ph, batches[0], dtypes[0], args.device, args.timestep)
-        target = plant.theta.clone()
+        run = build(ph, batches[0], dtypes[0], args.device, args.timestep)
+        target = run.plant.theta.clone()
         acts = [torch.profiler.ProfilerActivity.CPU]
         if args.device.startswith("cuda"):
             acts.append(torch.profiler.ProfilerActivity.CUDA)
         with torch.profiler.profile(activities=acts) as prof:
-            for _ in range(substeps):
-                plant.step(drive.volts(target))
+            run.policy_step(target, substeps)
         cuda = args.device.startswith("cuda")
         sort = args.profile_sort or ("self_cuda_time_total" if cuda else "self_cpu_time_total")
         print(f"profile: one policy step ({substeps} plant steps), batch {batches[0]}, {dtypes[0]}")
         print(prof.key_averages().table(sort_by=sort, row_limit=25))
-        del plant, drive
+        del run
 
     print(f"\n{'dtype':>8} {'batch':>6} {'ms/plant step':>14} {'ms/policy step':>15} "
           f"{'policy steps/s':>15} {'time for ' + f'{args.target:.0e}':>14}")
     for dtype in dtypes:
         for B in batches:
             try:
-                plant, drive = build(ph, B, dtype, args.device, args.timestep)
-                sec = time_policy_steps(plant, drive, substeps, args.warmup, args.iters, args.device)
+                run = build(ph, B, dtype, args.device, args.timestep)
+                sec = time_policy_steps(run, substeps, args.warmup, args.iters, args.device)
             except RuntimeError as exc:  # OOM, singular matrix in float32, ...
                 msg = str(exc).splitlines()[0][:200]
                 print(f"{str(dtype)[6:]:>8} {B:>6}  failed: {msg[:80]}")
                 report["speed"].append({"dtype": str(dtype)[6:], "batch": B, "error": msg})
-                plant = drive = None
+                run = None
                 if args.device.startswith("cuda"):
                     torch.cuda.empty_cache()
                 continue
@@ -168,7 +184,7 @@ def main():
             report["speed"].append({"dtype": str(dtype)[6:], "batch": B, "ms_plant_step": sec / substeps * 1e3,
                                     "ms_policy_step": sec * 1e3, "policy_steps_per_s": sps,
                                     "hours_for_target": hours, "target": args.target})
-            del plant, drive
+            del run
             if args.device.startswith("cuda"):
                 torch.cuda.empty_cache()
 
@@ -176,8 +192,8 @@ def main():
         print(f"\nquality: hold the stand pose for {args.hold_s:.1f} s, batch {args.quality_batch}, "
               f"servo gain x{args.gain:g}")
         for dtype in dtypes:
-            plant, drive = build(ph, args.quality_batch, dtype, args.device, args.timestep, args.gain)
-            q = hold_quality(plant, drive, args.hold_s)
+            run = build(ph, args.quality_batch, dtype, args.device, args.timestep, args.gain)
+            q = hold_quality(run, args.hold_s, substeps)
             print(f"  {str(dtype)[6:]:>8}: trunk z={q['trunk_z']:.4f} m  max tilt={q['tilt_deg']:.2f} deg  "
                   f"ledger residual={q['residual_J']:.2e} J (supplied {q['supplied_J']:.2f} J)  "
                   f"finite={q['finite']}")

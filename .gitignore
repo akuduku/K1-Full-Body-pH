@@ -3,3 +3,8 @@ __pycache__/
 .venv/
 outputs/
 .mplconfig/
+
+# C++/CUDA extension build output
+Physik C++/build/
+Physik C++/*.so
+*.egg-info/

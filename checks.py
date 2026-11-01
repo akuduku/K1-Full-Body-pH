@@ -6,6 +6,7 @@ Every check prints PASS/FAIL with the number it measured.
     cd "RL Policy for pH/Full Body"
     ../../Presentation/.venv/bin/python checks.py            # all
     ../../Presentation/.venv/bin/python checks.py mujoco arm # some
+    python checks.py --impl native                           # the same checks with the C++ plant
 
  1  mass      M(q) == MuJoCo mj_fullM, frames == MuJoCo xpos  (random q)
  2  gradient  analytic dT/dtheta == autograd                  (random q, nu)
@@ -40,6 +41,16 @@ from ph_k1.dynamics import forward_kinematics, kinetic_gradient  # noqa: E402
 from ph_k1.model import NB, NJ, load_k1  # noqa: E402
 from ph_k1.motors import DATASHEET, build_motors  # noqa: E402
 from ph_k1.plant import K1PHPlant  # noqa: E402
+
+IMPL = "python"
+if "--impl" in sys.argv:  # --impl native: every check steps the C++ plant ("Physik C++")
+    _i = sys.argv.index("--impl")
+    IMPL = sys.argv[_i + 1]
+    del sys.argv[_i : _i + 2]
+    if IMPL == "native":
+        from ph_k1.native import K1PHPlantNative as K1PHPlant  # noqa: E402,F811
+    elif IMPL != "python":
+        raise SystemExit(f"--impl {IMPL}: use python or native")
 
 ARM_DIR = HERE.parents[1] / "Presentation" / "K1" / "physik" / "Right Hand Model"
 RESULTS: list[tuple[str, bool | None, str]] = []
