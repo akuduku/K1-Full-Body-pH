@@ -11,3 +11,5 @@ ph_k1_cuda/*.so
 # training runs (rl/stand/train.py)
 logs/
 wandb/
+# colab-train's local state (rendered notebooks, browser screenshots)
+.colab-train/

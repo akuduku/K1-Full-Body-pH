@@ -13,8 +13,9 @@ Part of the master thesis *Physics-informed Reinforcement Learning for Soccer
 Robots* (Akos Eross, HTWK Leipzig). The repository has two halves:
 - **the physics**: the pH plant in Python (`ph_k1/`, the reference) and in C++/CUDA (`ph_k1_cuda/`, the same
   numbers, fast enough to train on), with the robot's firmware command path, validated in `validation/`;
-- **the RL training** on top of it (`rl/`): first skill `rl/stand/`, trained on Kaggle GPUs and exported as
-  the firmware's `stand` agent.
+- **the RL training** on top of it (`rl/`): `rl/stand/` (stand still, the firmware's `stand` agent, trained on
+  Kaggle) and `rl/getup/` (get up from lying and stay up, with a port-Hamiltonian controller: variable impedance
+  made passive by an energy tank, and rewards from the Hamiltonian and the energy ledger; trained on Colab).
 
 ## Where is what
 
@@ -26,16 +27,20 @@ validation/     checks.py: the physics against MuJoCo, autograd and the datashee
 examples/       hand-commanded experiments: play_volts, hold_pose, servo_video
 benchmarks/     speed: pH plant (torch / native) vs MJX
 rl/             RL TRAINING on the pH plant
+  common/       the PPO harness (W&B, checkpoints + deploy.bin, videos, time budget, clean stop, resume)
+                and the firmware's policy file format
   stand/        stand still under pushes: contract (= firmware obs/actions), env, train (PPO + W&B),
                 export (-> deploy.bin for the robot), eval_mujoco (laptop sim-to-sim check), tests
+  getup/        get up and stay up: contract (StandupAgent + gains), impedance (the energy tank), lying
+                (start states), env (pH rewards, curriculum), train (by time), eval_mujoco, tests
 kaggle/         GPU runs that clone this repo: TASK=stand kaggle/run.sh (training), kaggle/run.sh (benchmark)
-colab/          the benchmark as a Colab notebook
+colab/          colab-train job k1-getup.yaml + setup_gpu.sh (the get-up training), the benchmark notebook
 assets/K1/      Booster K1 MJCF + meshes
 docs/           figures and notes (robot_compatibility_for_ai.md: what transfers to the real robot)
 ```
 
-The RL side only talks to the physics through `K1PHPlantNative.policy_step(targets)`: 22 joint targets
-every 20 ms, the same way the real K1 is commanded.
+The RL side only talks to the physics through `K1PHPlantNative.policy_step(targets, kp, kd)`: 22 joint
+targets (and, for rl/getup, the gains) every 20 ms, the same way the real K1 is commanded.
 
 ![servo hold with a sideways push](docs/servo_hold_push.png)
 
@@ -145,8 +150,9 @@ python examples/hold_pose.py --gain 3 --push 20        # ... and is knocked side
 python examples/hold_pose.py --gain 1 --view           # firmware gains: tips over (see "Limits")
 
 cd ph_k1_cuda && python setup.py build_ext --inplace && cd ..   # the C++ plant (CUDA where nvcc exists)
-python -m pytest ph_k1_cuda/tests rl/stand/tests -q             # C++ == Python reference, stand task
+python -m pytest ph_k1_cuda/tests rl/stand/tests rl/getup/tests -q   # C++ == Python reference, the tasks
 TASK=stand kaggle/run.sh ITERATIONS=3000 RUN_NAME=stand-ph-v1   # train the stand policy on a Kaggle T4
+colab-train launch --browser colab/k1-getup.yaml               # train the get-up policy on a Colab T4
 ```
 
 Plots (energy tanks, ledger, trunk height and tilt) and CSVs are written to
@@ -183,9 +189,11 @@ plant.ph_matrices()                   # explicit J, D, G, ∇H for robot 0
 | `validation/checks.py` | Validation suite |
 | `examples/` | Hand-commanded experiments: `play_volts.py`, `hold_pose.py`, `servo_video.py` (servo hold video for W&B) |
 | `benchmarks/` | Speed of the plant (`benchmark_ph.py --impl torch\|native`), MJX on the same robot (`benchmark_mjx.py`) |
+| `rl/common/` | PPO harness shared by the skills (W&B, time-based checkpoints and videos, clean stop, resume with the curriculum) and the `.bin` format |
 | `rl/stand/` | **Stand policy** on the pH plant, as the firmware's `stand` agent: env, rsl-rl training (Kaggle), export to the robot's `.bin`, MuJoCo check |
+| `rl/getup/` | **Get-up policy** with a port-Hamiltonian controller (targets + stiffness + damping, energy tank) and pH rewards: env, training by time (Colab), MuJoCo check, the firmware agent it needs |
 | `assets/K1/` | Booster K1 MJCF and meshes; `K1_22dof_mjx_prims.xml` = primitive collisions for MJX |
-| `kaggle/`, `colab/` | GPU runs that clone this repo: the benchmark (`kaggle/run.sh`, Colab notebook) and the stand training (`TASK=stand kaggle/run.sh`) |
+| `kaggle/`, `colab/` | GPU runs that clone this repo: the benchmark (`kaggle/run.sh`, Colab notebook), the stand training (`TASK=stand kaggle/run.sh`), the get-up training (`colab/k1-getup.yaml` for colab-train) |
 | `docs/` | Figures and notes |
 
 The plant is batched: N robots step in parallel. PyTorch on the laptop CPU: about 5 ms per step

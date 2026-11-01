@@ -88,6 +88,13 @@ info = plant.policy_step(targets)        # targets (B,22) joint angles: one 50 H
 info.extra["gyro"], info.extra["acc"]    # the IMU, as the robot measures it
 plant.theta, info.extra["nu"][:, 6:]     # joint angles and speeds
 info = plant.step(volts)                 # or the plant alone: one plant step with coil volts (B,22)
+
+# a policy that sets its own gains every step (rl/getup): kp/kd (B,22) per call; with delay_gains they travel
+# through the delay line with the targets, as in the robot's LowCmd
+plant = K1PHPlantNative(..., firmware=FirmwareConfig(gains="standup", slew=False, delay_gains=True))
+info = plant.policy_step(targets, kp=kp, kd=kd)
+# an external world force on the trunk origin during the step (a training assist); its work -> ledger.mech_input
+info = plant.policy_step(targets, trunk_force=f)      # f (B,3) [N]; also plant.step(volts, trunk_force=f)
 ```
 
 `K1PHPlantNative` is a subclass of `K1PHPlant`: `reset`, `kinematics`, `velocity`, `energy`, `ledger`,
@@ -96,7 +103,7 @@ info = plant.step(volts)                 # or the plant alone: one plant step wi
 ## Tests and results
 
 ```bash
-python -m pytest ph_k1_cuda/tests -q                       # 14 tests: C++ vs Python, float64, CPU
+python -m pytest ph_k1_cuda/tests -q                       # 21 tests: C++ vs Python, float64, CPU
 PH_TEST_DEVICE=cuda python -m pytest ph_k1_cuda/tests -q   # the same on a GPU
 python validation/checks.py --impl native                               # 9/9 PASS
 python benchmarks/benchmark_ph.py --impl native              # speed
@@ -111,6 +118,10 @@ python benchmarks/benchmark_ph.py --impl native              # speed
   (+g, 0, 0) lying on the back, 0 in free fall
 - float32 on the default command path (10–40 ms delay) holds the stand pose (gain ×3, tilt 0.9°) with the
   energy-ledger residual 0.015 J
+- per-step gains through the delay line == the Python reference; a robot with delay d and gains changing every
+  step does exactly what an undelayed one did d ms earlier (and without the gain line it does not)
+- the trunk force == the Python reference; 250 N lifts the robot off, its work F·Δz goes into mech_input and
+  the ledger balances
 
 Laptop CPU (6 threads), float32, policy steps per second (50 Hz policy = 20 plant steps, with the command path):
 

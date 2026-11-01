@@ -354,3 +354,79 @@ def test_push_matches_reference(model64):
     R = nat.kinematics().R[:, 0]
     v_world = (R @ v[..., None]).squeeze(-1)
     assert v_world[0, 0] > 0.05 and v_world[1, 1] < -0.05 and v_world[2].abs().max() < 0.05
+
+
+def test_trunk_force_matches_reference(model64):
+    """An external world force on the trunk (the get-up assist) in C++ == K1PHPlant, its work in the ledger."""
+    torch.manual_seed(9)
+    py, nat = pair(model64, batch=3)
+    for pl in (py, nat):
+        pl.reset(clearance=-0.001)
+    f = torch.tensor([[0.0, 0.0, 120.0], [30.0, -20.0, 60.0], [0.0, 0.0, 0.0]], dtype=torch.float64, device=DEVICE)
+    v = 0.5 * torch.randn(3, NJ, dtype=torch.float64, device=DEVICE)
+    for s in range(80):
+        py.step(v, trunk_force=f)
+        nat.step(v, trunk_force=f)
+    same_state(py, nat, 1e-8, "trunk force")
+    assert py.ledger.mech_input[:2].abs().min() > 1e-3 and py.ledger.mech_input[2] == 0
+
+
+def test_trunk_force_lifts_and_the_ledger_balances(model64):
+    """250 N up (more than the weight) lifts the robot off: the force's work = F dz goes into mech_input and
+    H(t) - H(0) = supplied + mech_input - dissipated stays balanced."""
+    nat = K1PHPlantNative(model=model64, batch=1)
+    nat.reset()
+    H0 = nat.energy()["total"].clone()
+    z0 = nat.q[0, 2].item()
+    F = 250.0
+    for s in range(300):  # 0.3 s, coils shorted (0 V)
+        nat.step(trunk_force=torch.tensor([0.0, 0.0, F], dtype=torch.float64, device=DEVICE))
+    led = nat.ledger
+    dz = nat.q[0, 2].item() - z0
+    assert dz > 0.05, f"the robot should have been lifted, dz = {dz:.3f} m"
+    assert abs(led.mech_input[0].item() - F * dz) < 0.02 * F * dz, "work of the force != F dz"
+    residual = (nat.energy()["total"] - H0) - (led.supplied + led.mech_input - led.dissipated)
+    assert residual.abs().max() < 0.01 * led.mech_input.abs().max(), f"ledger residual {residual.item():.3f} J"
+
+
+def test_gain_line_matches_reference(model64):
+    """delay_gains: kp/kd through the delay line with the target, C++ == K1Firmware, gains changing every step."""
+    torch.manual_seed(10)
+    cfg = FirmwareConfig(gains="standup", slew=False, delay_gains=True)
+    py, nat, ref = _command_pair(model64, cfg, 3, [0, 7, 23])
+    kp0, kd0 = nat.gains()
+    for it in range(5):
+        target = py.theta + 0.3 * torch.randn(3, NJ, dtype=torch.float64, device=DEVICE)
+        kp = kp0 * torch.exp(0.8 * torch.randn(3, NJ, dtype=torch.float64, device=DEVICE))
+        kd = kd0 * torch.exp(0.8 * torch.randn(3, NJ, dtype=torch.float64, device=DEVICE))
+        a, b = ref.policy_step(target, kp=kp, kd=kd), nat.policy_step(target, kp=kp, kd=kd)
+        same_state(py, nat, 1e-8, f"gain line, policy step {it}")
+        _same_command_state(ref, nat, a, b, 1e-8, "gain line")
+
+
+@pytest.mark.parametrize("delay_gains", [True, False])
+def test_gains_are_delayed_with_the_target(model64, delay_gains):
+    """At rest without gravity, a robot with lag d does exactly what a robot with lag 0 did d plant steps earlier,
+    also when the gains change every step -- but only if the gains travel with the target."""
+    d = 9
+    torch.manual_seed(11)
+    cfg = FirmwareConfig(gains="standup", pos_clamp=False, slew=False, target_clamp=False, overspeed_guard=False,
+                         delay_gains=delay_gains)
+    nat = K1PHPlantNative(model=model64, batch=2, fixed_base=True, gravity=False, firmware=cfg)
+    nat.reset()
+    nat.lag = torch.tensor([0, d], dtype=torch.int32, device=DEVICE)
+    kp0, kd0 = nat.gains()
+    start = nat.theta.clone()
+    traj = []
+    for k in range(40):
+        target = start.clone()
+        target[:, 10] += 0.3  # left hip pitch
+        g = torch.exp(torch.randn(1, NJ, dtype=torch.float64, device=DEVICE)).expand(2, NJ)  # same for both robots
+        nat.policy_step(target, substeps=1, kp=kp0 * g, kd=kd0 * g)
+        traj.append(nat.theta[:, 10].clone())
+    traj = torch.stack(traj)
+    err = (traj[d:, 1] - traj[:-d, 0]).abs().max().item()
+    if delay_gains:
+        assert err < 1e-12, f"delayed robot differs from the shifted undelayed one by {err:.2e}"
+    else:
+        assert err > 1e-6, "without the gain line the delayed robot should feel the new gains too early"

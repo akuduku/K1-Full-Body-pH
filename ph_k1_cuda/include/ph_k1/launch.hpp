@@ -34,6 +34,12 @@ struct BatchT {
     const T* push = nullptr;           // B x 3  world-frame trunk velocity change at the policy step (or null)
     const T* kp = nullptr;
     const T* kd = nullptr;
+    // gains through the delay line, as on the robot (kp/kd travel in the same LowCmd as the target):
+    // B x ring_len x NJ each, written next to the target; null = the driver uses kp/kd at once
+    T* ring_kp = nullptr;
+    T* ring_kd = nullptr;
+    // both modes: B x 3 world-frame force on the trunk origin during every plant step (or null)
+    const T* force = nullptr;
     // outputs
     T* out_nu = nullptr;
     T* out_i = nullptr;
@@ -60,6 +66,7 @@ PH_HD StepIO<T> make_io(const BatchT<T>& b, int r, int nc) {
     io.target = nullptr;  // set per plant step in policy-step mode
     io.kp = b.kp ? b.kp + r * NJ : nullptr;
     io.kd = b.kd ? b.kd + r * NJ : nullptr;
+    io.fext = b.force ? b.force + r * 3 : nullptr;
     io.out_nu = b.out_nu ? b.out_nu + r * NV : nullptr;
     io.out_i = b.out_i ? b.out_i + r * NJ : nullptr;
     io.out_tau = b.out_tau ? b.out_tau + r * NJ : nullptr;
@@ -97,16 +104,31 @@ PH_HD void run_robot(const ModelData<T>& m, const BatchT<T>& b, int r, Work<T>& 
     // the firmware filter once per policy step, on the measured joint state
     T sent[NJ];
     safety_filter(m, b.policy_target + r * NJ, b.last_target + r * NJ, io.q + 7, w.nu + NB, io.kp, io.kd, sent);
-    // every plant step: into the delay line; the driver holds the target sent `lag` steps ago
-    T* ring = b.ring + static_cast<long>(r) * b.ring_len * NJ;
+    // every plant step: into the delay line; the driver holds the target (and, with ring_kp/ring_kd, the gains)
+    // sent `lag` steps ago
+    const long row = static_cast<long>(r) * b.ring_len * NJ;
+    T* ring = b.ring + row;
+    T* rkp = b.ring_kp ? b.ring_kp + row : nullptr;
+    T* rkd = b.ring_kd ? b.ring_kd + row : nullptr;
+    const T* kp_now = io.kp;
+    const T* kd_now = io.kd;
     int idx = b.ring_idx[r];
     int lag = b.lag[r];
     lag = lag < 0 ? 0 : (lag > b.ring_len - 1 ? b.ring_len - 1 : lag);
     for (int s = 0; s < b.nsub; ++s) {
         for (int k = 0; k < NJ; ++k) ring[idx * NJ + k] = sent[k];
+        if (rkp)
+            for (int k = 0; k < NJ; ++k) {
+                rkp[idx * NJ + k] = kp_now[k];
+                rkd[idx * NJ + k] = kd_now[k];
+            }
         int ri = idx - lag;
         if (ri < 0) ri += b.ring_len;
         io.target = ring + ri * NJ;
+        if (rkp) {
+            io.kp = rkp + ri * NJ;
+            io.kd = rkd + ri * NJ;
+        }
         if (b.out_target && s == b.nsub - 1)
             for (int k = 0; k < NJ; ++k) b.out_target[r * NJ + k] = io.target[k];
         plant_step(m, io, w);

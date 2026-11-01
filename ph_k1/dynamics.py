@@ -78,6 +78,45 @@ def _hinge_cache(model: K1Model) -> dict:
     return c
 
 
+def body_frames(model: K1Model, q: torch.Tensor):
+    """q (B,29) -> body orientations R (B,nb,3,3), origins P (B,nb,3) and centres of mass com (B,nb,3): the cheap
+    part of forward_kinematics (no Jacobians, no M), e.g. for rewards."""
+    B = q.shape[0]
+    r, quat, theta = q[:, :3], q[:, 3:7], q[:, 7:]
+    nb = model.nbody
+    c = _hinge_cache(model)
+    s_, c_ = torch.sin(theta)[..., None, None], torch.cos(theta)[..., None, None]
+    Rh = torch.eye(3, dtype=q.dtype, device=q.device) + s_ * c["K"] + (1 - c_) * c["K2"]  # (B,22,3,3)
+    R_loc = c["rot"] @ Rh
+    P_loc = c["pos"].expand(B, NJ, 3)
+    if c["anchored"]:
+        jp = c["jpos"]
+        P_loc = P_loc + (c["rot"] @ (jp - (Rh @ jp[..., None]).squeeze(-1))[..., None]).squeeze(-1)
+    Rs: list[torch.Tensor] = [None] * nb  # type: ignore[list-item]
+    Ps: list[torch.Tensor] = [None] * nb  # type: ignore[list-item]
+    for b in range(nb):
+        j = model.body_joint[b]
+        if j == -2:  # trunk: free joint, pose = (r, Q)
+            Rs[b], Ps[b] = quat_to_mat(quat), r
+            continue
+        pR, pP = Rs[model.parent[b]], Ps[model.parent[b]]
+        if j >= 0:
+            Rs[b] = pR @ R_loc[:, j]
+            Ps[b] = pP + _mv(pR, P_loc[:, j])
+        else:
+            Rs[b] = pR @ model.body_rot[b]
+            Ps[b] = pP + _mv(pR, model.body_pos[b])
+    R = torch.stack(Rs, 1)
+    P = torch.stack(Ps, 1)
+    com = P + (R @ model.ipos[None, :, :, None]).squeeze(-1)
+    return R, P, com
+
+
+def com_height(model: K1Model, com: torch.Tensor) -> torch.Tensor:
+    """Height of the whole robot's centre of mass (B,) from the body CoMs (B,nb,3): V_grav / (m g)."""
+    return (model.mass[None, :] * com[..., 2]).sum(-1) / model.mass.sum()
+
+
 def forward_kinematics(model: K1Model, q: torch.Tensor) -> Kinematics:
     """q (B,29) -> frames, Jacobians and M(q)."""
     B = q.shape[0]

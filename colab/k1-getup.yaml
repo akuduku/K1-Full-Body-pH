@@ -1,0 +1,60 @@
+# Get up from lying and stay standing, on the port-Hamiltonian plant (rl/getup), on a free Colab T4, by time.
+#
+# One session: setup (packages, CUDA build, GPU tests, ~10 min), then rl/getup/train.py trains for 2.75 h and stops
+# cleanly (final checkpoint + deploy.bin uploaded, W&B run finished); at limits.max_hours colab-train would send
+# SIGINT, which also stops cleanly.  A checkpoint every 10 min, so a disconnect loses at most that.
+# Next session: Run all again -- the runner downloads the newest checkpoint of the same W&B run (run id
+# getup-<run.name>) and the training continues the run AND its curriculum.
+#
+#   colab-train validate colab/k1-getup.yaml
+#   colab-train launch colab/k1-getup.yaml            # prints the steps (upload, T4, Run all)
+#   colab-train launch --browser colab/k1-getup.yaml  # or let it click them in its own Chrome
+# Colab Secrets (key icon, Notebook access ON): GITHUB_TOKEN (read access to the repo), WANDB_API_KEY.
+name: k1-getup
+description: K1 get-up + stay on the pH plant (variable impedance + energy tank, pH rewards), free Colab T4, by time.
+repo:
+  url: https://github.com/akuduku/K1-Full-Body-pH.git
+  branch: native-cuda
+  token_secret: GITHUB_TOKEN
+  token_user: x-access-token
+  submodules: false
+python: null                       # Colab's Python and its CUDA torch (the plant is built against it)
+install:
+  - bash colab/setup_gpu.sh
+mujoco_gl: true                    # EGL (or OSMesa) for the training videos
+env:
+  PYTHONUNBUFFERED: "1"
+  TORCH_CUDA_ARCH_LIST: "7.5+PTX"  # T4; PTX runs on newer GPUs too
+wandb:
+  mode: online
+  entity: karl-jahnel-universit-t-leipzig
+  project: Akos pH GetUp
+  api_key_secret: WANDB_API_KEY
+  iteration_key: _step
+run:
+  prefix: getup
+  name: ph-v1
+train:
+  task: getup
+  num_envs: 4096
+  max_iters: 100000                # an upper bound only: the time budget ends each session
+  save_every: 250
+  command: "python rl/getup/train.py --run-name {run_id} --num-envs {num_envs} --iterations {iters} --hours 2.75 --save-every-min 10 --video-every-min 30 --wandb-project \"{wandb_project}\" --wandb-entity {wandb_entity} --log-root logs{resume_args}"
+progress:
+  regex: 'Learning iteration (?P<iter>\d+)/(?P<total>\d+)'
+video:
+  every: 0                         # the trainer makes its own videos (every 30 min of training)
+resume:
+  source: wandb
+  checkpoint_glob: "logs/**/model_*.pt"
+  checkpoint_regex: 'model_(\d+)\.pt'
+  restore_dir: "logs/{run_id}/resume"
+  wandb_config_shim: true
+  iters_mode: total
+  args: " --resume {resume_path}"
+outputs: ["logs/**/deploy_*.bin"]
+limits:
+  max_hours: 3                     # training time per session; --hours 2.75 stops first
+runtime:
+  accelerator: GPU
+  gpu_type: T4

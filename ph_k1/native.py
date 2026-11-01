@@ -89,16 +89,27 @@ class K1PHPlantNative(K1PHPlant):
         B, dev = self.B, self.device
         D = fw.delay_line_length(self.firmware, self.h)
         theta = self.theta
-        if env_ids is None or getattr(self, "ring", None) is None or self.ring.shape[1] != D:
+        delay_gains = self.firmware.delay_gains
+        if (env_ids is None or getattr(self, "ring", None) is None or self.ring.shape[1] != D
+                or (getattr(self, "ring_kp", None) is not None) != delay_gains):
             self.last_target = theta.clone().contiguous()
             self.ring = theta[:, None, :].expand(B, D, NJ).clone().contiguous()
             self.ring_idx = torch.zeros(B, dtype=torch.int32, device=dev)
             self.lag = fw.draw_lags(self.firmware, B, self.h, dev)
+            self.ring_kp = self.ring_kd = None
+            if delay_gains:  # the agent's gains are in the line until its first commands arrive
+                kp0, kd0 = self.gains()
+                self.ring_kp = kp0[:, None, :].expand(B, D, NJ).clone().contiguous()
+                self.ring_kd = kd0[:, None, :].expand(B, D, NJ).clone().contiguous()
             return
         self.last_target[env_ids] = theta[env_ids]
         self.ring[env_ids] = theta[env_ids][:, None, :]
         self.ring_idx[env_ids] = 0
         self.lag[env_ids] = fw.draw_lags(self.firmware, len(env_ids), self.h, dev)
+        if delay_gains:
+            kp0, kd0 = self.gains()
+            self.ring_kp[env_ids] = kp0[env_ids][:, None, :]
+            self.ring_kd[env_ids] = kd0[env_ids][:, None, :]
 
     def set_delay(self, lo_ms: float, hi_ms: float | None = None, env_ids=None) -> None:
         """Draw the transport delay of the robots (all, or env_ids) uniformly in [lo_ms, hi_ms]."""
@@ -112,8 +123,10 @@ class K1PHPlantNative(K1PHPlant):
 
     def _prepare(self) -> None:
         """State tensors contiguous, with the plant's dtype/device (assignments like pl.p = ... are allowed)."""
-        for name in ("q", "p", "xi", "lam", "last_target", "ring"):
-            t = getattr(self, name)
+        for name in ("q", "p", "xi", "lam", "last_target", "ring", "ring_kp", "ring_kd"):
+            t = getattr(self, name, None)
+            if t is None:
+                continue
             if not t.is_contiguous() or t.dtype != self.dtype or t.device != self.device:
                 setattr(self, name, t.to(device=self.device, dtype=self.dtype).contiguous())
         for name in ("ring_idx", "lag"):
@@ -179,12 +192,19 @@ class K1PHPlantNative(K1PHPlant):
         return None if x is None else torch.as_tensor(x, dtype=self.dtype, device=self.device).expand(self.B, NJ).contiguous()
 
     # -------------------------------------------------------------- step
-    def step(self, volts: torch.Tensor | None = None, joint_torque: torch.Tensor | None = None) -> StepInfo:
+    def _force(self, trunk_force):
+        if trunk_force is None:
+            return None
+        return torch.as_tensor(trunk_force, dtype=self.dtype, device=self.device).expand(self.B, 3).contiguous()
+
+    def step(self, volts: torch.Tensor | None = None, joint_torque: torch.Tensor | None = None,
+             trunk_force: torch.Tensor | None = None) -> StepInfo:
         """The plant alone: advance h seconds with these coil volts (same as K1PHPlant.step)."""
         self._prepare()
         out = self._outputs(policy=False)
         self._native.run(self._model_block(), self.q, self.p, self.xi, self.lam, self._led,
-                         volts=self._rows(volts), joint_torque=self._rows(joint_torque), nsub=1, **out)
+                         volts=self._rows(volts), joint_torque=self._rows(joint_torque),
+                         trunk_force=self._force(trunk_force), nsub=1, **out)
         self.time += self.h
         return self._info(out)
 
@@ -201,11 +221,14 @@ class K1PHPlantNative(K1PHPlant):
 
     def policy_step(self, targets: torch.Tensor, substeps: int | None = None, kp: torch.Tensor | None = None,
                     kd: torch.Tensor | None = None, gain_scale: float | None = None,
-                    push_dv: torch.Tensor | None = None) -> StepInfo:
+                    push_dv: torch.Tensor | None = None, trunk_force: torch.Tensor | None = None) -> StepInfo:
         """One policy step on the robot's command path: `targets` (B,22) joint angles go through the firmware
         filter, the delay line and the motor driver for `substeps` plant steps (default policy_dt / h).
-        kp, kd (B,22) override the gains (domain randomisation); push_dv (B,3) changes the trunk's world velocity
-        at the start of the step (a shove; rows of zeros: no push).  Returns the StepInfo of the last plant step."""
+        kp, kd (B,22) override the gains (domain randomisation, or a policy's own gains; with
+        firmware.delay_gains they go through the delay line with the target); push_dv (B,3) changes the trunk's
+        world velocity at the start of the step (a shove; rows of zeros: no push); trunk_force (B,3) is a world
+        force on the trunk during the whole step (an assist; its work goes into ledger.mech_input).
+        Returns the StepInfo of the last plant step."""
         cfg = self.firmware
         if substeps is None:
             substeps = max(1, round(cfg.policy_dt / self.h))
@@ -224,6 +247,7 @@ class K1PHPlantNative(K1PHPlant):
                          ring_idx=self.ring_idx, lag=self.lag, kp=self._rows(kp), kd=self._rows(kd),
                          push=None if push_dv is None else torch.as_tensor(push_dv, dtype=self.dtype, device=self.device)
                          .expand(self.B, 3).contiguous(),
+                         ring_kp=self.ring_kp, ring_kd=self.ring_kd, trunk_force=self._force(trunk_force),
                          nsub=int(substeps), **out)
         self.time += substeps * self.h
         return self._info(out)

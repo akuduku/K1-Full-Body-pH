@@ -165,7 +165,9 @@ void run_t(const torch::Tensor& model, const torch::Tensor& q, const torch::Tens
            const c10::optional<torch::Tensor>& out_tau, const c10::optional<torch::Tensor>& out_v,
            const c10::optional<torch::Tensor>& out_fc, const c10::optional<torch::Tensor>& out_active,
            const c10::optional<torch::Tensor>& out_slip, const c10::optional<torch::Tensor>& out_gyro,
-           const c10::optional<torch::Tensor>& out_acc, const c10::optional<torch::Tensor>& out_target) {
+           const c10::optional<torch::Tensor>& out_acc, const c10::optional<torch::Tensor>& out_target,
+           const c10::optional<torch::Tensor>& ring_kp, const c10::optional<torch::Tensor>& ring_kd,
+           const c10::optional<torch::Tensor>& trunk_force) {
     TORCH_CHECK(model.scalar_type() == torch::kUInt8 && model.numel() == static_cast<int64_t>(sizeof(ph::ModelData<T>)),
                 "model block was packed for the other float type (or is corrupt)");
     TORCH_CHECK(model.device() == q.device(), "model block is on ", model.device(), ", the state on ", q.device());
@@ -199,7 +201,11 @@ void run_t(const torch::Tensor& model, const torch::Tensor& q, const torch::Tens
         b.push = rows<T>(push, q, B, 3, "push");
         b.kp = rows<T>(kp, q, B, ph::NJ, "kp", true);
         b.kd = rows<T>(kd, q, B, ph::NJ, "kd", true);
+        b.ring_kp = rows<T>(ring_kp, q, B, b.ring_len * ph::NJ, "ring_kp");
+        b.ring_kd = rows<T>(ring_kd, q, B, b.ring_len * ph::NJ, "ring_kd");
+        TORCH_CHECK((b.ring_kp == nullptr) == (b.ring_kd == nullptr), "give ring_kp and ring_kd together");
     }
+    b.force = rows<T>(trunk_force, q, B, 3, "trunk_force");
     b.out_nu = rows<T>(out_nu, q, B, ph::NV, "out_nu");
     b.out_i = rows<T>(out_i, q, B, ph::NJ, "out_i");
     b.out_tau = rows<T>(out_tau, q, B, ph::NJ, "out_tau");
@@ -235,14 +241,18 @@ void run(const torch::Tensor& model, const torch::Tensor& q, const torch::Tensor
          const c10::optional<torch::Tensor>& out_tau, const c10::optional<torch::Tensor>& out_v,
          const c10::optional<torch::Tensor>& out_fc, const c10::optional<torch::Tensor>& out_active,
          const c10::optional<torch::Tensor>& out_slip, const c10::optional<torch::Tensor>& out_gyro,
-         const c10::optional<torch::Tensor>& out_acc, const c10::optional<torch::Tensor>& out_target) {
+         const c10::optional<torch::Tensor>& out_acc, const c10::optional<torch::Tensor>& out_target,
+           const c10::optional<torch::Tensor>& ring_kp, const c10::optional<torch::Tensor>& ring_kd,
+           const c10::optional<torch::Tensor>& trunk_force) {
     TORCH_CHECK(nsub >= 1, "nsub must be >= 1");
     if (q.scalar_type() == torch::kFloat64) {
         run_t<double>(model, q, p, xi, lam, ledger, volts, jtau, target, last_target, ring, ring_idx, lag, push, kp, kd, nsub,
-                      out_nu, out_i, out_tau, out_v, out_fc, out_active, out_slip, out_gyro, out_acc, out_target);
+                      out_nu, out_i, out_tau, out_v, out_fc, out_active, out_slip, out_gyro, out_acc, out_target,
+                      ring_kp, ring_kd, trunk_force);
     } else if (q.scalar_type() == torch::kFloat32) {
         run_t<float>(model, q, p, xi, lam, ledger, volts, jtau, target, last_target, ring, ring_idx, lag, push, kp, kd, nsub,
-                     out_nu, out_i, out_tau, out_v, out_fc, out_active, out_slip, out_gyro, out_acc, out_target);
+                     out_nu, out_i, out_tau, out_v, out_fc, out_active, out_slip, out_gyro, out_acc, out_target,
+                      ring_kp, ring_kd, trunk_force);
     } else {
         TORCH_CHECK(false, "state must be float32 or float64");
     }
@@ -264,7 +274,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
             py::arg("out_nu") = py::none(), py::arg("out_i") = py::none(), py::arg("out_tau") = py::none(),
             py::arg("out_v") = py::none(), py::arg("out_fc") = py::none(), py::arg("out_active") = py::none(),
             py::arg("out_slip") = py::none(), py::arg("out_gyro") = py::none(), py::arg("out_acc") = py::none(),
-            py::arg("out_target") = py::none());
+            py::arg("out_target") = py::none(), py::arg("ring_kp") = py::none(), py::arg("ring_kd") = py::none(),
+            py::arg("trunk_force") = py::none());
     mod.attr("NQ") = ph::NQ;
     mod.attr("NV") = ph::NV;
     mod.attr("NJ") = ph::NJ;

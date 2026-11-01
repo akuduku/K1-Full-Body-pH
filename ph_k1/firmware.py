@@ -67,6 +67,9 @@ GAIN_PRESETS = {
     # k1_config.h Prepare::stiffness / damping (Booster's prepare pose)
     "prepare": ((40.0, 40.0) + (40.0, 50.0, 20.0, 20.0) * 2 + (350.0, 350.0, 180.0, 350.0, 250.0, 250.0) * 2,
                 (1.5, 1.5) + (0.5, 1.5, 0.2, 0.2) * 2 + (7.5, 7.5, 3.0, 5.5, 5.0, 5.0) * 2),
+    # src/agents/sprint.cpp kKp / kKd: the sprint agent's gains, also the standup agent's (StandupAgent)
+    "standup": ((4.0, 4.0) + (10.0,) * 8 + (80.0, 80.0, 80.0, 80.0, 50.0, 50.0) * 2,
+                (0.25, 0.25) + (1.0,) * 8 + (4.0, 4.0, 4.0, 4.0, 5.6, 3.0) * 2),
 }
 
 
@@ -84,6 +87,9 @@ class FirmwareConfig:
     delay_ms: tuple[float, float] = (10.0, 40.0)  # transport delay, drawn per robot at reset
     delay_hold_prob: float | None = None  # None: one lag per episode; p: keep it with prob p every policy step
     max_delay_ms: float = 100.0      # length of the delay line
+    # kp/kd through the delay line with the target (they share the LowCmd); matters when a policy changes the
+    # gains every step (variable impedance).  False: the driver uses the commanded gains at once (fixed gains).
+    delay_gains: bool = False
 
 
 def check_tables(model: K1Model) -> None:
@@ -197,18 +203,24 @@ class K1Firmware:
     def reset(self, env_ids=None) -> None:
         pl, B = self.plant, self.plant.B
         D = delay_line_length(self.cfg, pl.h)
+        kp0, kd0 = gains(pl.model, self.cfg.gains, self.cfg.gain_scale)  # in the gain line until commands arrive
         if env_ids is None or not hasattr(self, "ring"):
             self.last_target = pl.theta.clone()
             self.ring = pl.theta[:, None, :].expand(B, D, NJ).clone()
             self.ring_idx = torch.zeros(B, dtype=torch.long, device=pl.device)
             self.lag = draw_lags(self.cfg, B, pl.h, pl.device).long()
+            self.ring_kp = kp0.expand(B, D, NJ).clone() if self.cfg.delay_gains else None
+            self.ring_kd = kd0.expand(B, D, NJ).clone() if self.cfg.delay_gains else None
             return
         self.last_target[env_ids] = pl.theta[env_ids]
         self.ring[env_ids] = pl.theta[env_ids][:, None, :]
         self.ring_idx[env_ids] = 0
         self.lag[env_ids] = draw_lags(self.cfg, len(env_ids), pl.h, pl.device).long()
+        if self.ring_kp is not None:
+            self.ring_kp[env_ids] = kp0
+            self.ring_kd[env_ids] = kd0
 
-    def policy_step(self, target, substeps: int | None = None, kp=None, kd=None, push_dv=None):
+    def policy_step(self, target, substeps: int | None = None, kp=None, kd=None, push_dv=None, trunk_force=None):
         pl, cfg = self.plant, self.cfg
         if substeps is None:
             substeps = max(1, round(cfg.policy_dt / pl.h))
@@ -238,11 +250,17 @@ class K1Firmware:
         info = None
         for _ in range(substeps):
             self.ring[rows, self.ring_idx] = t
-            sent = self.ring[rows, (self.ring_idx - self.lag) % D]
+            held = (self.ring_idx - self.lag) % D
+            sent = self.ring[rows, held]
+            kp_held, kd_held = kp, kd
+            if self.ring_kp is not None:  # the gains travel with the target
+                self.ring_kp[rows, self.ring_idx] = kp
+                self.ring_kd[rows, self.ring_idx] = kd
+                kp_held, kd_held = self.ring_kp[rows, held], self.ring_kd[rows, held]
             kin = pl.kinematics()
             nu = pl.velocity(kin)
-            volts = motor_volts(pl, sent, kp, kd, qd=nu[:, NB:])
-            info = pl.step(volts)
+            volts = motor_volts(pl, sent, kp_held, kd_held, qd=nu[:, NB:])
+            info = pl.step(volts, trunk_force=trunk_force)
             info.extra["gyro"], info.extra["acc"] = imu_step(pl, kin, nu)
             info.extra["target"] = sent
             self.ring_idx = (self.ring_idx + 1) % D

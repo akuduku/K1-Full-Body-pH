@@ -69,7 +69,7 @@ class Ledger:
     """Cumulative energy book-keeping per robot [J]."""
 
     supplied: torch.Tensor  # integral of v.i (electrical port)
-    mech_input: torch.Tensor  # integral of tau_ext.theta_dot (test torque port)
+    mech_input: torch.Tensor  # integral of tau_ext.theta_dot + f_ext.v_trunk (test torque port, trunk force)
     copper: torch.Tensor  # i^2 R
     gearbox: torch.Tensor  # d theta_dot^2
     stops: torch.Tensor  # end-stop dampers
@@ -219,11 +219,14 @@ class K1PHPlant:
         return out
 
     # ------------------------------------------------------------------ step
-    def step(self, volts: torch.Tensor | None = None, joint_torque: torch.Tensor | None = None) -> StepInfo:
-        """Advance h seconds.  volts (B,22) is the ONLY physical input.
+    def step(self, volts: torch.Tensor | None = None, joint_torque: torch.Tensor | None = None,
+             trunk_force: torch.Tensor | None = None) -> StepInfo:
+        """Advance h seconds.  volts (B,22) is the ONLY physical input of the robot.
 
         joint_torque is a test port for validation with motors_connected=False
         (torque straight onto the hinges, like MuJoCo's qfrc_applied).
+        trunk_force (B,3) is an external world-frame force on the trunk origin (a training assist, a hand);
+        its work enters ledger.mech_input like the joint_torque port's.
         """
         m, h, B = self.model, self.h, self.B
         mot, c, lim = self.motors, self.contact, self.limits
@@ -245,6 +248,11 @@ class K1PHPlant:
             F += generalized_force(kin, gravity_wrenches(m, kin))
         if joint_torque is not None:
             F[:, NB:] += joint_torque
+        f_body = None
+        if trunk_force is not None and not self.fixed_base:  # generalised force (0, R^T f) on (omega_B, v_B)
+            f_w = torch.as_tensor(trunk_force, dtype=self.dtype, device=self.device).expand(B, 3)
+            f_body = (kin.R[:, 0].transpose(1, 2) @ f_w[..., None]).squeeze(-1)
+            F[:, 3:6] += f_body
 
         # implicit diagonal on the hinge rows: gearbox + end-stop
         diag = mot.damping.expand(B, NJ).clone()
@@ -353,6 +361,8 @@ class K1PHPlant:
         led.contact += diss_contact
         if joint_torque is not None:
             led.mech_input += h * (joint_torque * thd1).sum(-1)
+        if f_body is not None:
+            led.mech_input += h * (f_body * nu1[:, 3:6]).sum(-1)
 
         # ---- configuration update ------------------------------------------
         q = self.q.clone()

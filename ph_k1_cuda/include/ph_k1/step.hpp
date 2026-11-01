@@ -24,6 +24,7 @@ struct StepIO {
     T* ledger;       // LEDGER
     const T* volts;  // NJ, null = 0 V (ignored while the motor driver runs)
     const T* jtau;   // NJ test torque port, null = none
+    const T* fext;   // 3 world-frame force on the trunk origin (e.g. a get-up assist), null = none
     // motor driver; active when target != null (set per plant step by the command path in launch.hpp)
     const T* target;    // NJ the target the driver holds this step (already filtered and delayed)
     const T* kp;        // NJ
@@ -220,6 +221,16 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
     if (m.gravity) add_gravity(m, w.f, w.F);
     if (io.jtau)
         for (int k = 0; k < NJ; ++k) w.F[NB + k] += io.jtau[k];
+    // a world force f on the trunk origin: generalised force (0, R^T f) on (omega_B, v_B); its power f.v
+    T f_body[3] = {T(0), T(0), T(0)};
+    const bool use_fext = io.fext && !m.fixed_base;
+    if (use_fext) {
+        const T* R0 = w.f.R[0];
+        for (int i = 0; i < 3; ++i) {
+            f_body[i] = R0[0 * 3 + i] * io.fext[0] + R0[1 * 3 + i] * io.fext[1] + R0[2 * 3 + i] * io.fext[2];
+            w.F[3 + i] += f_body[i];
+        }
+    }
 
     // hinge diagonal: gearbox damping + end stops
     for (int k = 0; k < NJ; ++k) {
@@ -338,6 +349,8 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
         if (m.limits_enabled && w.stop_on[k]) stops += (m.lim_c + h * m.lim_k) * thd1[k] * thd1[k];
         if (io.jtau) mech += io.jtau[k] * thd1[k];
     }
+    if (use_fext)
+        for (int i = 0; i < 3; ++i) mech += f_body[i] * w.nu1[3 + i];
     io.ledger[0] += h * supplied;
     io.ledger[1] += h * mech;
     io.ledger[2] += h * copper;
