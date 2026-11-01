@@ -1,6 +1,6 @@
 r"""Train the get-up policy (get up from lying, stay standing) on the pH plant with rsl-rl PPO, by wall-clock time.
 
-    python rl/getup/train.py --hours 2.7 --run-name getup-ph-v1                 # GPU (Colab / Kaggle T4)
+    python rl/getup/train.py --hours 6.75 --run-name getup-ph-v1                 # GPU (Colab / Kaggle T4)
     python rl/getup/train.py --device cpu --num-envs 64 --hours 0.02 --no-wandb  # smoke test
     python rl/getup/train.py --no-tank ...                                       # ablation: no energy tank
     python rl/getup/train.py --reward battery=0 ...                              # ablation: no energy reward

@@ -20,10 +20,10 @@ Colab Secrets (key icon, **Notebook access** on):
 - `GITHUB_TOKEN`: read access to `akuduku/K1-Full-Body-pH`;
 - `WANDB_API_KEY`.
 
-**One session**, about 3 h, with the tab kept open:
+**One session**, up to about 7 h, with the tab kept open:
 1. `setup_gpu.sh`: packages next to Colab's CUDA torch, the CUDA build of `ph_k1_cuda`, its tests on the GPU
    (no training on a plant that fails them).
-2. 2.75 h of training, a checkpoint every 10 min, a video every 30 min.
+2. 6.75 h of training, a checkpoint every 10 min, a video every 30 min.
 3. A clean stop: final checkpoint, `deploy.bin`, the W&B run finished.
 
 **The next session:** **Run all** again. The newest checkpoint of the same W&B run (`getup-ph-v1`) is
@@ -35,7 +35,8 @@ restored, and the training continues the run and its curriculum. A disconnect in
 - one session per account;
 - a daily GPU quota: on "usage limit", wait some hours.
 
-That is why the training is planned in time (2.75 h sessions), not in iterations.
+That is why the training is planned in time (6.75 h sessions), not in iterations. If Colab ends a session earlier, at
+most 10 min are lost.
 
 ## The speed benchmark (`ph_bench_colab.ipynb`)
 

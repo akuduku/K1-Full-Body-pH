@@ -1,6 +1,6 @@
 # Get up from lying and stay standing, on the port-Hamiltonian plant (rl/getup), on a free Colab T4, by time.
 #
-# One session: setup (packages, CUDA build, GPU tests, ~10 min), then rl/getup/train.py trains for 2.75 h and stops
+# One session: setup (packages, CUDA build, GPU tests, ~10 min), then rl/getup/train.py trains for 6.75 h and stops
 # cleanly (final checkpoint + deploy.bin uploaded, W&B run finished); at limits.max_hours colab-train would send
 # SIGINT, which also stops cleanly.  A checkpoint every 10 min, so a disconnect loses at most that.
 # Next session: Run all again -- the runner downloads the newest checkpoint of the same W&B run (run id
@@ -39,7 +39,7 @@ train:
   num_envs: 4096
   max_iters: 100000                # an upper bound only: the time budget ends each session
   save_every: 250
-  command: "python rl/getup/train.py --run-name {run_id} --num-envs {num_envs} --iterations {iters} --hours 2.75 --save-every-min 10 --video-every-min 30 --wandb-project \"{wandb_project}\" --wandb-entity {wandb_entity} --log-root logs{resume_args}"
+  command: "python rl/getup/train.py --run-name {run_id} --num-envs {num_envs} --iterations {iters} --hours 6.75 --save-every-min 10 --video-every-min 30 --wandb-project \"{wandb_project}\" --wandb-entity {wandb_entity} --log-root logs{resume_args}"
 progress:
   regex: 'Learning iteration (?P<iter>\d+)/(?P<total>\d+)'
 video:
@@ -54,7 +54,8 @@ resume:
   args: " --resume {resume_path}"
 outputs: ["logs/**/deploy_*.bin"]
 limits:
-  max_hours: 3                     # training time per session; --hours 2.75 stops first
+  max_hours: 7                     # training time per session; --hours 6.75 stops first (free Colab may end
+                                   # a session earlier: a checkpoint every 10 min, Run all resumes)
 runtime:
   accelerator: GPU
   gpu_type: T4

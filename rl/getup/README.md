@@ -77,12 +77,13 @@ colab-train launch --browser colab/k1-getup.yaml     # or without --browser: it 
 
 Each session runs these steps:
 1. `colab/setup_gpu.sh`: packages, CUDA build, GPU tests, about 10 min.
-2. `rl/getup/train.py --hours 2.75`: training, then a clean stop (final checkpoint, `deploy.bin`, W&B run
+2. `rl/getup/train.py --hours 6.75`: training, then a clean stop (final checkpoint, `deploy.bin`, W&B run
    finished). A checkpoint is written every 10 min, so a disconnect loses at most that.
 3. In the next session, **Run all** again continues the same W&B run, including its curriculum.
 
-The rough budget on a T4 is about 35 M steps per hour, about 1 000 PPO iterations per session. Plan **3–4
-sessions**: the RL_Core and Stand Up get-ups needed 200–300 M steps. W&B: `karl-jahnel-universit-t-leipzig` /
+The rough budget on a T4 is about 35 M steps per hour, about 2 500 PPO iterations per full 7 h session. Plan
+**about 2 full sessions** (more if Colab ends them early): the RL_Core and Stand Up get-ups needed 200–300 M
+steps. W&B: `karl-jahnel-universit-t-leipzig` /
 **Akos pH GetUp**.
 
 ```bash
