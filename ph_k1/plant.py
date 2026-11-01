@@ -305,12 +305,13 @@ class K1PHPlant:
             f = self.free
             Af = A[:, f][:, :, f]
             b1 = (self.p + h * Ftot)[:, f]
-            Lc = torch.linalg.cholesky(Af)
-            nu0 = torch.cholesky_solve(b1[..., None], Lc).squeeze(-1)
             E = torch.zeros(B, len(f), NJ, dtype=self.dtype, device=self.device)
             jr = self.jrows  # hinge positions inside the free dofs
             E[:, jr, torch.arange(NJ, device=self.device)] = 1.0
-            Y = torch.cholesky_solve(E, Lc)  # A^-1 B
+            # A^-1 [b1 | B] in one solve (A is SPD).  Not cholesky/cholesky_solve: some CUDA builds of torch lack
+            # their kernels for older GPUs (Colab's torch 2.11+cu130 on a T4: "no kernel image"); linalg.solve works.
+            X = torch.linalg.solve(Af, torch.cat((b1[..., None], E), -1))
+            nu0, Y = X[..., 0], X[..., 1:]  # Y = A^-1 B
             Mj = Y[:, jr]  # B^T A^-1 B
             Ksys = torch.diag_embed(mot.L + h * mot.R) + h * h * Ks[:, :, None] * Mj * Ks[:, None, :]
             rhs = mot.L * i_n + h * v - h * Ks * nu0[:, jr]

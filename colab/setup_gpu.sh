@@ -23,5 +23,20 @@ if ! (cd ph_k1_cuda && PH_K1_CUDA="${PH_K1_CUDA:-1}" TORCH_CUDA_ARCH_LIST="${TOR
     exit 1
 fi
 echo "[setup] CUDA plant built in $(( $(date +%s) - start )) s"
+# which of torch's linear-algebra kernels this torch build has for this GPU (Colab's torch 2.11+cu130 on a T4 lacks
+# some, e.g. for cholesky_solve: the plant uses linalg.solve)
+if [ "${PH_TEST_DEVICE:-cuda}" = cuda ]; then
+    $PY - <<'PROBE' || true
+import torch
+A = torch.eye(4, device="cuda", dtype=torch.float64).expand(2, 4, 4) + 0.1
+b = torch.ones(2, 4, 1, device="cuda", dtype=torch.float64)
+for name, fn in (("linalg.solve", lambda: torch.linalg.solve(A, b)), ("cholesky", lambda: torch.linalg.cholesky(A))):
+    try:
+        fn(); torch.cuda.synchronize(); print(f"[setup] torch {name} on the GPU: ok", flush=True)
+    except Exception as e:
+        print(f"[setup] torch {name} on the GPU: missing ({type(e).__name__})", flush=True)
+        break
+PROBE
+fi
 PH_TEST_DEVICE="${PH_TEST_DEVICE:-cuda}" $PY -m pytest ph_k1_cuda/tests rl/getup/tests -q -p no:cacheprovider
 echo "[setup] GPU tests passed"
