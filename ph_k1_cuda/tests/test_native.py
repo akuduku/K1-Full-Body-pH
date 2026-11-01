@@ -153,7 +153,10 @@ def _same_command_state(ref, nat, a, b, tol, what):
                        ("gyro", a.extra["gyro"], b.extra["gyro"]), ("acc", a.extra["acc"], b.extra["acc"]),
                        ("torque", a.torque, b.torque)):
         err = (x - y).abs().max().item()
-        assert err < tol, f"{what} {name}: {err:.3e}"
+        # the accelerometer is (v_{n+1} - v_n) / h: round-off of the velocities (GPU and CPU sum in a different
+        # order) comes out x1/h = x1000 larger, so it gets that much more room than the states
+        limit = tol * 100 if name == "acc" else tol
+        assert err < limit, f"{what} {name}: {err:.3e}"
 
 
 @pytest.mark.parametrize("switches", ["on", "off"])
