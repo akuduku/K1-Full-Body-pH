@@ -78,6 +78,8 @@ torch::Tensor pack(const TensorMap& t, const std::map<std::string, double>& s, c
     put(m.armature, t, "armature", ph::NJ);
     put(m.jnt_low, t, "jnt_low", ph::NJ);
     put(m.jnt_high, t, "jnt_high", ph::NJ);
+    put(m.stop_low, t, "stop_low", ph::NJ);
+    put(m.stop_high, t, "stop_high", ph::NJ);
     m.lim_k = static_cast<T>(num("lim_k"));
     m.lim_c = static_cast<T>(num("lim_c"));
     if (nc > 0) {
@@ -95,7 +97,17 @@ torch::Tensor pack(const TensorMap& t, const std::map<std::string, double>& s, c
     put(m.tau_max, t, "motor_tau_max", ph::NJ);
     put(m.damping, t, "motor_damping", ph::NJ);
     m.v_max = static_cast<T>(num("v_max"));
-    m.slew = static_cast<T>(num("slew"));
+    m.fw_pos_clamp = flag("fw_pos_clamp");
+    m.fw_slew = flag("fw_slew");
+    m.fw_target_clamp = flag("fw_target_clamp");
+    m.fw_overspeed = flag("fw_overspeed");
+    m.policy_dt = static_cast<T>(num("policy_dt"));
+    put(m.fw_effort, t, "fw_effort", ph::NJ);
+    put(m.fw_max_joint_velocity, t, "fw_max_joint_velocity", ph::NJ);
+    put(m.fw_max_target_velocity, t, "fw_max_target_velocity", ph::NJ);
+    for (int k = 0; k < ph::NJ; ++k)
+        TORCH_CHECK(m.stop_low[k] <= m.jnt_low[k] && m.stop_high[k] >= m.jnt_high[k],
+                    "end stop of hinge ", k, " lies inside its command range");
     TORCH_CHECK(m.body_joint[0] == -2 && m.parent[0] == -1, "body 0 must be the free trunk");
     for (int b = 1; b < nb; ++b) TORCH_CHECK(m.parent[b] >= 0 && m.parent[b] < b, "bodies must be in tree order");
 
@@ -124,6 +136,15 @@ T* rows(const c10::optional<torch::Tensor>& x, const torch::Tensor& ref, int64_t
     return t.data_ptr<T>();
 }
 
+int* rows_i32(const c10::optional<torch::Tensor>& x, const torch::Tensor& ref, int64_t B, const char* name) {
+    TORCH_CHECK(x.has_value() && x->defined(), name, " is required in policy-step mode");
+    const auto& t = *x;
+    TORCH_CHECK(t.device() == ref.device(), name, " is on the wrong device");
+    TORCH_CHECK(t.scalar_type() == torch::kInt32 && t.is_contiguous() && t.numel() == B,
+                name, " must be a contiguous int32 tensor of ", B);
+    return t.data_ptr<int>();
+}
+
 uint8_t* rows_u8(const c10::optional<torch::Tensor>& x, const torch::Tensor& ref, int64_t B, int64_t width, const char* name) {
     if (!x.has_value() || !x->defined()) return nullptr;
     const auto& t = *x;
@@ -136,12 +157,15 @@ uint8_t* rows_u8(const c10::optional<torch::Tensor>& x, const torch::Tensor& ref
 template <class T>
 void run_t(const torch::Tensor& model, const torch::Tensor& q, const torch::Tensor& p, const torch::Tensor& xi,
            const torch::Tensor& lam, const torch::Tensor& ledger, const c10::optional<torch::Tensor>& volts,
-           const c10::optional<torch::Tensor>& jtau, const c10::optional<torch::Tensor>& q_star,
-           const c10::optional<torch::Tensor>& target, const c10::optional<torch::Tensor>& kp,
-           const c10::optional<torch::Tensor>& kd, int64_t nsub, const c10::optional<torch::Tensor>& out_nu,
-           const c10::optional<torch::Tensor>& out_i, const c10::optional<torch::Tensor>& out_tau,
-           const c10::optional<torch::Tensor>& out_v, const c10::optional<torch::Tensor>& out_fc,
-           const c10::optional<torch::Tensor>& out_active, const c10::optional<torch::Tensor>& out_slip) {
+           const c10::optional<torch::Tensor>& jtau, const c10::optional<torch::Tensor>& target,
+           const c10::optional<torch::Tensor>& last_target, const c10::optional<torch::Tensor>& ring,
+           const c10::optional<torch::Tensor>& ring_idx, const c10::optional<torch::Tensor>& lag,
+           const c10::optional<torch::Tensor>& kp, const c10::optional<torch::Tensor>& kd, int64_t nsub,
+           const c10::optional<torch::Tensor>& out_nu, const c10::optional<torch::Tensor>& out_i,
+           const c10::optional<torch::Tensor>& out_tau, const c10::optional<torch::Tensor>& out_v,
+           const c10::optional<torch::Tensor>& out_fc, const c10::optional<torch::Tensor>& out_active,
+           const c10::optional<torch::Tensor>& out_slip, const c10::optional<torch::Tensor>& out_gyro,
+           const c10::optional<torch::Tensor>& out_acc, const c10::optional<torch::Tensor>& out_target) {
     TORCH_CHECK(model.scalar_type() == torch::kUInt8 && model.numel() == static_cast<int64_t>(sizeof(ph::ModelData<T>)),
                 "model block was packed for the other float type (or is corrupt)");
     TORCH_CHECK(model.device() == q.device(), "model block is on ", model.device(), ", the state on ", q.device());
@@ -161,9 +185,17 @@ void run_t(const torch::Tensor& model, const torch::Tensor& q, const torch::Tens
     b.ledger = rows<T>(ledger, q, B, ph::LEDGER, "ledger", true);
     b.volts = rows<T>(volts, q, B, ph::NJ, "volts");
     b.jtau = rows<T>(jtau, q, B, ph::NJ, "joint_torque");
-    b.q_star = rows<T>(q_star, q, B, ph::NJ, "q_star");
-    if (b.q_star) {
-        b.target = rows<T>(target, q, B, ph::NJ, "target", true);
+    b.policy_target = rows<T>(target, q, B, ph::NJ, "target");
+    if (b.policy_target) {
+        TORCH_CHECK(!b.volts && !b.jtau, "give either target (policy step) or volts/joint_torque, not both");
+        b.last_target = rows<T>(last_target, q, B, ph::NJ, "last_target", true);
+        TORCH_CHECK(ring.has_value() && ring->defined() && B > 0 && ring->numel() % (B * ph::NJ) == 0,
+                    "ring must be (B, ring_len, 22)");
+        b.ring_len = static_cast<int>(ring->numel() / (B * ph::NJ));
+        TORCH_CHECK(b.ring_len >= 1, "ring_len must be >= 1");
+        b.ring = rows<T>(ring, q, B, b.ring_len * ph::NJ, "ring", true);
+        b.ring_idx = rows_i32(ring_idx, q, B, "ring_idx");
+        b.lag = rows_i32(lag, q, B, "lag");
         b.kp = rows<T>(kp, q, B, ph::NJ, "kp", true);
         b.kd = rows<T>(kd, q, B, ph::NJ, "kd", true);
     }
@@ -174,6 +206,9 @@ void run_t(const torch::Tensor& model, const torch::Tensor& q, const torch::Tens
     b.out_fc = rows<T>(out_fc, q, B, nc * 3, "out_fc");
     b.out_active = rows_u8(out_active, q, B, nc, "out_active");
     b.out_slip = rows_u8(out_slip, q, B, nc, "out_slip");
+    b.out_gyro = rows<T>(out_gyro, q, B, 3, "out_gyro");
+    b.out_acc = rows<T>(out_acc, q, B, 3, "out_acc");
+    b.out_target = rows<T>(out_target, q, B, ph::NJ, "out_target");
 
     if (q.is_cuda()) {
 #ifdef PH_K1_WITH_CUDA
@@ -191,19 +226,22 @@ void run_t(const torch::Tensor& model, const torch::Tensor& q, const torch::Tens
 
 void run(const torch::Tensor& model, const torch::Tensor& q, const torch::Tensor& p, const torch::Tensor& xi,
          const torch::Tensor& lam, const torch::Tensor& ledger, const c10::optional<torch::Tensor>& volts,
-         const c10::optional<torch::Tensor>& jtau, const c10::optional<torch::Tensor>& q_star,
-         const c10::optional<torch::Tensor>& target, const c10::optional<torch::Tensor>& kp,
-         const c10::optional<torch::Tensor>& kd, int64_t nsub, const c10::optional<torch::Tensor>& out_nu,
-         const c10::optional<torch::Tensor>& out_i, const c10::optional<torch::Tensor>& out_tau,
-         const c10::optional<torch::Tensor>& out_v, const c10::optional<torch::Tensor>& out_fc,
-         const c10::optional<torch::Tensor>& out_active, const c10::optional<torch::Tensor>& out_slip) {
+         const c10::optional<torch::Tensor>& jtau, const c10::optional<torch::Tensor>& target,
+         const c10::optional<torch::Tensor>& last_target, const c10::optional<torch::Tensor>& ring,
+         const c10::optional<torch::Tensor>& ring_idx, const c10::optional<torch::Tensor>& lag,
+         const c10::optional<torch::Tensor>& kp, const c10::optional<torch::Tensor>& kd, int64_t nsub,
+         const c10::optional<torch::Tensor>& out_nu, const c10::optional<torch::Tensor>& out_i,
+         const c10::optional<torch::Tensor>& out_tau, const c10::optional<torch::Tensor>& out_v,
+         const c10::optional<torch::Tensor>& out_fc, const c10::optional<torch::Tensor>& out_active,
+         const c10::optional<torch::Tensor>& out_slip, const c10::optional<torch::Tensor>& out_gyro,
+         const c10::optional<torch::Tensor>& out_acc, const c10::optional<torch::Tensor>& out_target) {
     TORCH_CHECK(nsub >= 1, "nsub must be >= 1");
     if (q.scalar_type() == torch::kFloat64) {
-        run_t<double>(model, q, p, xi, lam, ledger, volts, jtau, q_star, target, kp, kd, nsub, out_nu, out_i, out_tau,
-                      out_v, out_fc, out_active, out_slip);
+        run_t<double>(model, q, p, xi, lam, ledger, volts, jtau, target, last_target, ring, ring_idx, lag, kp, kd, nsub,
+                      out_nu, out_i, out_tau, out_v, out_fc, out_active, out_slip, out_gyro, out_acc, out_target);
     } else if (q.scalar_type() == torch::kFloat32) {
-        run_t<float>(model, q, p, xi, lam, ledger, volts, jtau, q_star, target, kp, kd, nsub, out_nu, out_i, out_tau,
-                     out_v, out_fc, out_active, out_slip);
+        run_t<float>(model, q, p, xi, lam, ledger, volts, jtau, target, last_target, ring, ring_idx, lag, kp, kd, nsub,
+                     out_nu, out_i, out_tau, out_v, out_fc, out_active, out_slip, out_gyro, out_acc, out_target);
     } else {
         TORCH_CHECK(false, "state must be float32 or float64");
     }
@@ -215,13 +253,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
     mod.doc() = "K1 port-Hamiltonian plant in C++/CUDA (see Physik C++/README.md)";
     mod.def("pack_model", &pack_model, "constants block (uint8 CPU tensor) from the model tensors",
             py::arg("tensors"), py::arg("scalars"), py::arg("ints"), py::arg("use_double"));
-    mod.def("run", &run, "advance every robot `nsub` plant steps in place", py::arg("model"), py::arg("q"),
+    mod.def("run", &run, "advance every robot `nsub` plant steps in place (volts mode, or policy-step mode "
+            "through the robot's command path when `target` is given)", py::arg("model"), py::arg("q"),
             py::arg("p"), py::arg("xi"), py::arg("lam"), py::arg("ledger"), py::arg("volts") = py::none(),
-            py::arg("joint_torque") = py::none(), py::arg("q_star") = py::none(), py::arg("target") = py::none(),
+            py::arg("joint_torque") = py::none(), py::arg("target") = py::none(), py::arg("last_target") = py::none(),
+            py::arg("ring") = py::none(), py::arg("ring_idx") = py::none(), py::arg("lag") = py::none(),
             py::arg("kp") = py::none(), py::arg("kd") = py::none(), py::arg("nsub") = 1,
             py::arg("out_nu") = py::none(), py::arg("out_i") = py::none(), py::arg("out_tau") = py::none(),
             py::arg("out_v") = py::none(), py::arg("out_fc") = py::none(), py::arg("out_active") = py::none(),
-            py::arg("out_slip") = py::none());
+            py::arg("out_slip") = py::none(), py::arg("out_gyro") = py::none(), py::arg("out_acc") = py::none(),
+            py::arg("out_target") = py::none());
     mod.attr("NQ") = ph::NQ;
     mod.attr("NV") = ph::NV;
     mod.attr("NJ") = ph::NJ;

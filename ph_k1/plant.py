@@ -192,7 +192,7 @@ class K1PHPlant:
         else:
             out["contact"] = zeros_b
         if lim.enabled:
-            over = (self.theta - m.jnt_high).clamp_min(0) + (m.jnt_low - self.theta).clamp_min(0)
+            over = (self.theta - m.stop_high).clamp_min(0) + (m.stop_low - self.theta).clamp_min(0)
             out["stops"] = 0.5 * lim.k * (over**2).sum(-1)
         else:
             out["stops"] = zeros_b
@@ -231,8 +231,8 @@ class K1PHPlant:
         # implicit diagonal on the hinge rows: gearbox + end-stop
         diag = mot.damping.expand(B, NJ).clone()
         if lim.enabled:
-            over = (theta - m.jnt_high).clamp_min(0)
-            under = (m.jnt_low - theta).clamp_min(0)
+            over = (theta - m.stop_high).clamp_min(0)
+            under = (m.stop_low - theta).clamp_min(0)
             stop_on = (over > 0) | (under > 0)
             F[:, NB:] += lim.k * (under - over)
             diag = diag + stop_on * (lim.c + h * lim.k)
@@ -383,7 +383,7 @@ class K1PHPlant:
                 V = V + 0.5 * c.k_n * (delta**2).sum() + 0.5 * c.k_t * (xi**2).sum()
             if lim.enabled:
                 th = q[:, 7:]
-                V = V + 0.5 * lim.k * ((torch.relu(th - m.jnt_high) ** 2) + torch.relu(m.jnt_low - th) ** 2).sum()
+                V = V + 0.5 * lim.k * ((torch.relu(th - m.stop_high) ** 2) + torch.relu(m.stop_low - th) ** 2).sum()
             return T + V + (lam**2 / (2 * mot.L)).sum()
 
         xs = [t.clone().requires_grad_(True) for t in (q0, p0, xi0, lam0)]
@@ -425,7 +425,7 @@ class K1PHPlant:
         Dp[jr, jr] = mot.damping
         if lim.enabled:
             th = q0[0, 7:]
-            on = ((th > m.jnt_high) | (th < m.jnt_low)).to(dt)
+            on = ((th > m.stop_high) | (th < m.stop_low)).to(dt)
             Dp[jr, jr] += on * lim.c
         if use_contact:
             pc = self._sole_points(kin)
@@ -454,8 +454,8 @@ class K1PHPlant:
             Fp += generalized_force(kin, gravity_wrenches(m, kin))[0]
         th = q0[0, 7:]
         if lim.enabled:
-            on = ((th > m.jnt_high) | (th < m.jnt_low)).to(dt)
-            Fp[NB:] += lim.k * ((m.jnt_low - th).clamp_min(0) - (th - m.jnt_high).clamp_min(0)) - on * lim.c * nu[NB:]
+            on = ((th > m.stop_high) | (th < m.stop_low)).to(dt)
+            Fp[NB:] += lim.k * ((m.stop_low - th).clamp_min(0) - (th - m.stop_high).clamp_min(0)) - on * lim.c * nu[NB:]
         Fp[NB:] += Ks * i_n - mot.damping * nu[NB:]
         xi_dot = torch.zeros(0, dtype=dt)
         if use_contact:

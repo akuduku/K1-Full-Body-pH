@@ -11,10 +11,7 @@ void run_cpu(const ModelData<T>& m, const BatchT<T>& b) {
     {
         auto w = std::make_unique<Work<T>>();
 #pragma omp for schedule(static)
-        for (int r = 0; r < b.B; ++r) {
-            const StepIO<T> io = make_io(b, r, m.ncontact);
-            for (int s = 0; s < b.nsub; ++s) plant_step(m, io, *w);
-        }
+        for (int r = 0; r < b.B; ++r) run_robot(m, b, r, *w);
     }
 }
 

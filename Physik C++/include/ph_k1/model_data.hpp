@@ -37,10 +37,13 @@ struct ModelData {
     T I_body[MAX_BODIES][9];   // rotational inertia about the COM, body frame
     T armature[NJ];
 
-    // end stops
+    // joint ranges: the MJCF range is the firmware's command clamp; the mechanical end stops are wider
+    // (ph_k1/model.py MEASURED_RANGE: the real K1 went past the MJCF range in its get-ups)
     T jnt_low[NJ];
     T jnt_high[NJ];
-    T lim_k, lim_c;
+    T stop_low[NJ];
+    T stop_high[NJ];
+    T lim_k, lim_c;  // end-stop spring and damper
 
     // contact points (fixed to bodies) and their pH elements
     int contact_body[MAX_CONTACTS];
@@ -51,8 +54,16 @@ struct ModelData {
     T mk[NJ], mR[NJ], mL[NJ], tau_max[NJ], damping[NJ];
     T v_max;
 
-    // classical servo (ph_k1/drive.py): slew limit of the target [rad/s]
-    T slew;
+    // the robot's command path (K1_Deploy firmware safety.cpp apply_safety, once per policy step;
+    // ph_k1/firmware.py is the reference): switches and tables
+    int fw_pos_clamp;
+    int fw_slew;
+    int fw_target_clamp;
+    int fw_overspeed;
+    T policy_dt;                  // k1_config.h kDt
+    T fw_effort[NJ];              // effort_limit (= MJCF forcerange)
+    T fw_max_joint_velocity[NJ];  // max_joint_velocity (overspeed guard)
+    T fw_max_target_velocity[NJ]; // max_target_velocity (slew)
 };
 
 }  // namespace ph

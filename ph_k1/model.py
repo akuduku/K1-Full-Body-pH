@@ -49,6 +49,27 @@ HOME_POSE = {
     "Right_Ankle_Pitch": -0.4,
 }
 
+# Joint angles the real K1 (Phobos) reached in its two get-ups, min/max over getup_2236.csv and
+# getup_front_2250.csv (Karls Repo/Logs/30102026, 25 Oct 2026, 500 Hz).  Several lie outside the MJCF range
+# (docs/robot_compatibility_for_ai.md): the MJCF range is the FIRMWARE's command clamp (K1_Deploy
+# k1_config.h joint_pos_lower/upper are the same numbers), not the mechanical stop.
+MEASURED_RANGE = {
+    "AAHead_yaw": (-0.718, 1.343), "Head_pitch": (-0.413, 0.753),
+    "ALeft_Shoulder_Pitch": (-2.005, 0.490), "Left_Shoulder_Roll": (-1.804, -0.148),
+    "Left_Elbow_Pitch": (-0.858, 1.403), "Left_Elbow_Yaw": (-2.237, 0.221),
+    "ARight_Shoulder_Pitch": (-1.093, 1.110), "Right_Shoulder_Roll": (0.343, 1.772),
+    "Right_Elbow_Pitch": (-1.595, 0.447), "Right_Elbow_Yaw": (-0.169, 2.066),
+    "Left_Hip_Pitch": (-1.111, 2.168), "Left_Hip_Roll": (-0.511, 1.240), "Left_Hip_Yaw": (-0.774, 1.053),
+    "Left_Knee_Pitch": (-0.010, 1.520), "Left_Ankle_Pitch": (-0.843, 0.141), "Left_Ankle_Roll": (-0.445, 0.348),
+    "Right_Hip_Pitch": (-1.691, 0.644), "Right_Hip_Roll": (-1.521, 0.455), "Right_Hip_Yaw": (-0.719, 0.786),
+    "Right_Knee_Pitch": (-0.028, 1.943), "Right_Ankle_Pitch": (-0.793, 0.331), "Right_Ankle_Roll": (-0.353, 0.503),
+}
+# Mechanical end stops of the plant (the pH end-stop springs): the MJCF range widened by STOP_TOLERANCE (the
+# firmware accepts readings up to 0.15 rad past its range, K1_Deploy main.cpp range check), and further to
+# MEASURED_RANGE + STOP_MARGIN where the robot went beyond that.
+STOP_TOLERANCE = 0.15
+STOP_MARGIN = 0.05
+
 
 def _quat_mat(q) -> np.ndarray:
     out = np.zeros(9)
@@ -81,8 +102,10 @@ class K1Model:
     ipos: torch.Tensor  # (nb,3) COM in body frame
     I_body: torch.Tensor  # (nb,3,3) rotational inertia about COM, body frame
     armature: torch.Tensor  # (22,)
-    jnt_low: torch.Tensor  # (22,)
+    jnt_low: torch.Tensor  # (22,) MJCF range = the firmware's command clamp
     jnt_high: torch.Tensor  # (22,)
+    stop_low: torch.Tensor  # (22,) mechanical end stops (end-stop springs), wider: see MEASURED_RANGE
+    stop_high: torch.Tensor  # (22,)
     forcerange: torch.Tensor  # (22,) |tau| ceiling of the MJCF <motor>
     support: torch.Tensor  # (nb,28) 1 if dof d moves body b
     subtree: torch.Tensor  # (22,nb) 1 if body b is at/after hinge k
@@ -203,6 +226,12 @@ def load_k1(
         act_range[j] = m.actuator_forcerange[a, 1] if m.actuator_forcelimited[a] else np.inf
 
     rng = m.jnt_range[1:]
+    stop_lo, stop_hi = rng[:, 0] - STOP_TOLERANCE, rng[:, 1] + STOP_TOLERANCE
+    for j, name in enumerate(jnames):
+        if name in MEASURED_RANGE:
+            lo, hi = MEASURED_RANGE[name]
+            stop_lo[j] = min(stop_lo[j], lo - STOP_MARGIN)
+            stop_hi[j] = max(stop_hi[j], hi + STOP_MARGIN)
     return K1Model(
         mj=m,
         xml_path=xml_path,
@@ -224,6 +253,8 @@ def load_k1(
         armature=T(m.dof_armature[NB:]),
         jnt_low=T(rng[:, 0]),
         jnt_high=T(rng[:, 1]),
+        stop_low=T(stop_lo),
+        stop_high=T(stop_hi),
         forcerange=T(act_range),
         support=T(support),
         subtree=T(subtree),

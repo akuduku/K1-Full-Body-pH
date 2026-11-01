@@ -1,4 +1,4 @@
-// CUDA launcher: one thread = one robot, all `nsub` plant steps (and the servo) inside one launch.
+// CUDA launcher: one thread = one robot, the command path and all `nsub` plant steps inside one launch.
 // The per-robot work buffers live in local memory (L1/L2-cached); the constants block is read through
 // the read-only cache.
 #include <cuda_runtime.h>
@@ -15,8 +15,7 @@ __global__ void step_kernel(const ModelData<T>* __restrict__ md, BatchT<T> b) {
     const int r = blockIdx.x * blockDim.x + threadIdx.x;
     if (r >= b.B) return;
     Work<T> w;
-    const StepIO<T> io = make_io(b, r, md->ncontact);
-    for (int s = 0; s < b.nsub; ++s) plant_step(*md, io, w);
+    run_robot(*md, b, r, w);
 }
 
 static void check(cudaError_t e, const char* what) {

@@ -1,6 +1,6 @@
-// One plant step h for ONE robot: ph_k1/plant.py K1PHPlant.step, term by term, plus the classical servo
-// of ph_k1/drive.py (K1Drive.volts).  Called by the CPU loop (one robot per OpenMP iteration) and the CUDA
-// kernel (one robot per thread) alike.
+// One plant step h for ONE robot: ph_k1/plant.py K1PHPlant.step, term by term, plus the motor driver of the
+// robot's command path (ph_k1/firmware.py motor_volts: PD on the delayed target -> volts).  Called by the CPU
+// loop (one robot per OpenMP iteration) and the CUDA kernel (one robot per thread) alike.
 //
 //   explicit at x_n: gyroscopic, dT/dtheta, gravity, test torque, spring parts of contact and end stops
 //   implicit:        dampers, contact/end-stop stiffness (linearised), motor gyrator, coil resistance,
@@ -22,11 +22,10 @@ struct StepIO {
     T* xi;           // ncontact x 2  tangential bristles
     T* lam;          // NJ coil fluxes
     T* ledger;       // LEDGER
-    const T* volts;  // NJ, null = 0 V (ignored while the servo drives)
+    const T* volts;  // NJ, null = 0 V (ignored while the motor driver runs)
     const T* jtau;   // NJ test torque port, null = none
-    // servo (ph_k1/drive.py); active when q_star != null
-    T* q_star;          // NJ slew-limited target (state)
-    const T* target;    // NJ commanded angles
+    // motor driver; active when target != null (set per plant step by the command path in launch.hpp)
+    const T* target;    // NJ the target the driver holds this step (already filtered and delayed)
     const T* kp;        // NJ
     const T* kd;        // NJ
     // outputs of this step, each may be null
@@ -37,6 +36,8 @@ struct StepIO {
     T* out_fc;          // ncontact x 3 world contact force
     uint8_t* out_active;  // ncontact  normal contact on
     uint8_t* out_slip;    // ncontact  slipping
+    T* out_gyro;        // 3  trunk angular velocity, trunk frame (the robot's gyro)
+    T* out_acc;         // 3  specific force of the trunk origin, trunk frame (the robot's accelerometer)
 };
 
 template <class T>
@@ -62,18 +63,16 @@ template <class T> PH_HD T gyrator_scale(const ModelData<T>& m, int k, T i) {
     return ki > m.tau_max[k] ? m.tau_max[k] / p_max(ki, T(1e-30)) : T(1);
 }
 
-// K1Drive.volts: target -> volts with the slew limit, the PD law, the motor's torque envelope at this
-// speed and a one-step current loop matched to the plant's implicit electrical row.
+// The motor driver (firmware.py motor_volts): PD on the target it holds, limited by the motor's torque
+// envelope at this speed, and a one-step current loop matched to the plant's implicit electrical row.
+// Clamp, slew and delay happened before (firmware.hpp, launch.hpp).
 template <class T>
-PH_HD void servo_volts(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
+PH_HD void driver_volts(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
     const T* th = io.q + 7;
-    const T step = m.slew * m.h;
     for (int k = 0; k < NJ; ++k) {
-        const T cmd = p_clamp(io.target[k], m.jnt_low[k], m.jnt_high[k]);
-        io.q_star[k] += p_clamp(cmd - io.q_star[k], -step, step);
         const T qd = w.nu[NB + k];
         const T i = w.i_n[k];
-        T tau = io.kp[k] * (io.q_star[k] - th[k]) - io.kd[k] * qd;
+        T tau = io.kp[k] * (io.target[k] - th[k]) - io.kd[k] * qd;
         const T sgn = tau > T(0) ? T(1) : (tau < T(0) ? T(-1) : T(0));
         const T avail = p_max((m.v_max - m.mk[k] * qd * sgn) * m.mk[k] / m.mR[k], T(0));
         const T cap = p_min(avail, m.tau_max[k]);
@@ -161,6 +160,21 @@ PH_HD void implicit_solve(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w
     }
 }
 
+// kinematics, M(q) and nu = M^-1 p on the free dofs (zeros on a welded trunk) -> w.f, w.M, w.nu
+template <class T>
+PH_HD void kinematics_and_velocity(const ModelData<T>& m, const T* q, const T* p, Work<T>& w) {
+    const int f0 = m.fixed_base ? NB : 0;
+    const int n = NV - f0;
+    forward_kinematics(m, q, w.f);
+    mass_matrix(m, w.f, w.M);
+    for (int a = 0; a < n; ++a)
+        for (int b = 0; b < n; ++b) w.A[a * NV + b] = w.M[(a + f0) * NV + (b + f0)];
+    cholesky<T, NV>(w.A, n);
+    for (int d = 0; d < NV; ++d) w.nu[d] = 0;
+    for (int a = 0; a < n; ++a) w.nu[a + f0] = p[a + f0];
+    cholesky_solve<T, NV>(w.A, n, w.nu + f0);
+}
+
 template <class T>
 PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
     const T h = m.h;
@@ -170,22 +184,13 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
     T* q = io.q;
     T* th = q + 7;
 
-    // kinematics and M at x_n
-    forward_kinematics(m, q, w.f);
-    mass_matrix(m, w.f, w.M);
-
-    // nu = M^-1 p on the free dofs (zeros on a welded trunk)
-    for (int a = 0; a < n; ++a)
-        for (int b = 0; b < n; ++b) w.A[a * NV + b] = w.M[(a + f0) * NV + (b + f0)];
-    cholesky<T, NV>(w.A, n);
-    for (int d = 0; d < NV; ++d) w.nu[d] = 0;
-    for (int a = 0; a < n; ++a) w.nu[a + f0] = io.p[a + f0];
-    cholesky_solve<T, NV>(w.A, n, w.nu + f0);
+    // kinematics, M and nu at x_n
+    kinematics_and_velocity(m, q, io.p, w);
     for (int k = 0; k < NJ; ++k) w.i_n[k] = io.lam[k] / m.mL[k];
 
     // input voltage
-    if (io.q_star) {
-        servo_volts(m, io, w);
+    if (io.target) {
+        driver_volts(m, io, w);
     } else {
         for (int k = 0; k < NJ; ++k) w.v[k] = io.volts ? io.volts[k] : T(0);
     }
@@ -221,8 +226,8 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
         w.diag[k] = m.damping[k];
         w.stop_on[k] = 0;
         if (m.limits_enabled) {
-            const T over = p_max(th[k] - m.jnt_high[k], T(0));
-            const T under = p_max(m.jnt_low[k] - th[k], T(0));
+            const T over = p_max(th[k] - m.stop_high[k], T(0));
+            const T under = p_max(m.stop_low[k] - th[k], T(0));
             w.stop_on[k] = (over > T(0)) || (under > T(0));
             w.F[NB + k] += m.lim_k * (under - over);
             if (w.stop_on[k]) w.diag[k] += m.lim_c + h * m.lim_k;
@@ -339,6 +344,23 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
     io.ledger[3] += h * gearbox;
     io.ledger[4] += h * stops;
     io.ledger[5] += diss_contact;
+
+    // the robot's IMU: gyro = omega_B(n+1); accelerometer = R^T (a - g) of the trunk origin with
+    // a = R_n ((v_B(n+1) - v_B(n)) / h + omega_B(n+1) x v_B(n+1))   (firmware.py imu_step)
+    if (io.out_gyro || io.out_acc) {
+        T wv[3];
+        cross3(w.nu1, w.nu1 + 3, wv);
+        T acc[3];
+        for (int i = 0; i < 3; ++i) acc[i] = (w.nu1[3 + i] - w.nu[3 + i]) / h + wv[i];
+        if (m.gravity) {
+            const T* R0 = w.f.R[0];
+            for (int i = 0; i < 3; ++i) acc[i] -= R0[0 * 3 + i] * m.g[0] + R0[1 * 3 + i] * m.g[1] + R0[2 * 3 + i] * m.g[2];
+        }
+        for (int i = 0; i < 3; ++i) {
+            if (io.out_gyro) io.out_gyro[i] = w.nu1[i];
+            if (io.out_acc) io.out_acc[i] = acc[i];
+        }
+    }
 
     // configuration update; p_{n+1} = M(q_n) nu_{n+1}
     if (!m.fixed_base) {

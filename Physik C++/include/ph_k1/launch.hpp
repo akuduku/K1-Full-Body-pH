@@ -1,7 +1,14 @@
-// A batch of robots as raw row-major pointers (B rows each), and the two launchers that run
-// `nsub` plant steps for every robot: the CPU loop (src/cpu.cpp) and the CUDA kernel (src/cuda.cu).
+// A batch of robots as raw row-major pointers (B rows each), the per-robot driver loop shared by the CPU and
+// the GPU, and the two launchers (src/cpu.cpp: OpenMP over robots; src/cuda.cu: one thread per robot).
+//
+// Two modes:
+//   volts         nsub plant steps with the same volts (or the joint_torque test port): the plant alone
+//   policy step   the robot's command path (ph_k1/firmware.py): the policy target goes through the firmware
+//                 filter once, then for each of the nsub plant steps into the delay line; the motor driver holds
+//                 the target sent `lag` plant steps ago
 #pragma once
 
+#include "firmware.hpp"
 #include "step.hpp"
 
 namespace ph {
@@ -17,10 +24,16 @@ struct BatchT {
     T* ledger = nullptr;
     const T* volts = nullptr;
     const T* jtau = nullptr;
-    T* q_star = nullptr;
-    const T* target = nullptr;
+    // command path (policy-step mode when policy_target != null)
+    const T* policy_target = nullptr;  // B x NJ  what the policy commands
+    T* last_target = nullptr;          // B x NJ  firmware state: last sent target
+    T* ring = nullptr;                 // B x ring_len x NJ  delay line (sent targets, one per plant step)
+    int* ring_idx = nullptr;           // B  write position
+    const int* lag = nullptr;          // B  delay in plant steps, 0 .. ring_len-1
+    int ring_len = 0;
     const T* kp = nullptr;
     const T* kd = nullptr;
+    // outputs
     T* out_nu = nullptr;
     T* out_i = nullptr;
     T* out_tau = nullptr;
@@ -28,6 +41,9 @@ struct BatchT {
     T* out_fc = nullptr;
     uint8_t* out_active = nullptr;
     uint8_t* out_slip = nullptr;
+    T* out_gyro = nullptr;
+    T* out_acc = nullptr;
+    T* out_target = nullptr;  // B x NJ  the target the driver held in the last plant step
 };
 
 template <class T>
@@ -40,8 +56,7 @@ PH_HD StepIO<T> make_io(const BatchT<T>& b, int r, int nc) {
     io.ledger = b.ledger + r * LEDGER;
     io.volts = b.volts ? b.volts + r * NJ : nullptr;
     io.jtau = b.jtau ? b.jtau + r * NJ : nullptr;
-    io.q_star = b.q_star ? b.q_star + r * NJ : nullptr;
-    io.target = b.target ? b.target + r * NJ : nullptr;
+    io.target = nullptr;  // set per plant step in policy-step mode
     io.kp = b.kp ? b.kp + r * NJ : nullptr;
     io.kd = b.kd ? b.kd + r * NJ : nullptr;
     io.out_nu = b.out_nu ? b.out_nu + r * NV : nullptr;
@@ -51,7 +66,39 @@ PH_HD StepIO<T> make_io(const BatchT<T>& b, int r, int nc) {
     io.out_fc = b.out_fc ? b.out_fc + r * nc * 3 : nullptr;
     io.out_active = b.out_active ? b.out_active + r * nc : nullptr;
     io.out_slip = b.out_slip ? b.out_slip + r * nc : nullptr;
+    io.out_gyro = b.out_gyro ? b.out_gyro + r * 3 : nullptr;
+    io.out_acc = b.out_acc ? b.out_acc + r * 3 : nullptr;
     return io;
+}
+
+// everything one robot does in one call: nsub plant steps, through the command path in policy-step mode
+template <class T>
+PH_HD void run_robot(const ModelData<T>& m, const BatchT<T>& b, int r, Work<T>& w) {
+    StepIO<T> io = make_io(b, r, m.ncontact);
+    if (!b.policy_target) {
+        for (int s = 0; s < b.nsub; ++s) plant_step(m, io, w);
+        return;
+    }
+    // the firmware filter once per policy step, on the measured joint state
+    kinematics_and_velocity(m, io.q, io.p, w);
+    T sent[NJ];
+    safety_filter(m, b.policy_target + r * NJ, b.last_target + r * NJ, io.q + 7, w.nu + NB, io.kp, io.kd, sent);
+    // every plant step: into the delay line; the driver holds the target sent `lag` steps ago
+    T* ring = b.ring + static_cast<long>(r) * b.ring_len * NJ;
+    int idx = b.ring_idx[r];
+    int lag = b.lag[r];
+    lag = lag < 0 ? 0 : (lag > b.ring_len - 1 ? b.ring_len - 1 : lag);
+    for (int s = 0; s < b.nsub; ++s) {
+        for (int k = 0; k < NJ; ++k) ring[idx * NJ + k] = sent[k];
+        int ri = idx - lag;
+        if (ri < 0) ri += b.ring_len;
+        io.target = ring + ri * NJ;
+        if (b.out_target && s == b.nsub - 1)
+            for (int k = 0; k < NJ; ++k) b.out_target[r * NJ + k] = io.target[k];
+        plant_step(m, io, w);
+        idx = idx + 1 == b.ring_len ? 0 : idx + 1;
+    }
+    b.ring_idx[r] = idx;
 }
 
 template <class T> void run_cpu(const ModelData<T>& m, const BatchT<T>& b);

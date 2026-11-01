@@ -51,27 +51,28 @@ def _sync(device: str):
 
 
 class Runner:
-    """One policy step = servo (target -> volts) + `substeps` plant steps.  torch: K1Drive + K1PHPlant.step
-    in Python; native: K1PHPlantNative.policy_step, the whole policy step in one C++/CUDA call."""
+    """One policy step on the robot's command path (ph_k1/firmware.py: firmware filter, 10-40 ms delay, motor
+    driver) + `substeps` plant steps.  torch: firmware.K1Firmware + K1PHPlant.step in Python; native:
+    K1PHPlantNative.policy_step, the whole policy step in one C++/CUDA call."""
 
-    def __init__(self, plant, drive, gain, native):
-        self.plant, self.drive, self.gain, self.native = plant, drive, gain, native
+    def __init__(self, plant, firmware, native):
+        self.plant, self.firmware, self.native = plant, firmware, native
 
     def policy_step(self, target, substeps):
-        if self.native:
-            self.plant.policy_step(target, substeps, gain_scale=self.gain)
-        else:
-            for _ in range(substeps):
-                self.plant.step(self.drive.volts(target))
+        (self.plant if self.native else self.firmware).policy_step(target, substeps)
 
 
 def build(ph, batch: int, dtype: torch.dtype, device: str, timestep: float, gain: float = 1.0):
-    K1PHPlant, K1Drive, load_k1, impl = ph
+    K1PHPlant, _K1Drive, load_k1, impl = ph
+    from ph_k1.firmware import FirmwareConfig, K1Firmware
+
+    cfg = FirmwareConfig(gain_scale=gain)
     model = load_k1(dtype=dtype, device=device)
+    if impl == "native":
+        plant = K1PHPlant(model=model, batch=batch, timestep=timestep, firmware=cfg)
+        return Runner(plant, None, True)
     plant = K1PHPlant(model=model, batch=batch, timestep=timestep)
-    drive = K1Drive(plant, gain_scale=gain)
-    drive.reset()
-    return Runner(plant, drive, gain, impl == "native")
+    return Runner(plant, K1Firmware(plant, cfg), False)
 
 
 def time_policy_steps(run, substeps: int, warmup: int, iters: int, device: str):

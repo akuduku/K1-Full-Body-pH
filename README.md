@@ -147,17 +147,22 @@ plant.ph_matrices()                   # explicit J, D, G, ∇H for robot 0
 | `ph_k1/motors.py` | 22 DC motors from the datasheet torque–speed curves |
 | `ph_k1/contact.py` | Contact and end-stop parameters |
 | `ph_k1/plant.py` | **`K1PHPlant`**: state, `step(volts)`, `energy()`, energy ledger, `ph_matrices()` |
-| `ph_k1/drive.py` | Classical servo: target angles → volts (not RL) |
+| `ph_k1/drive.py` | Classical servo of the physics checks: target angles → volts (not the robot's path) |
+| `ph_k1/firmware.py` | **The robot's command path** (K1_Deploy firmware): filter, delay line, motor driver, IMU; Python reference |
+| `ph_k1/native.py` | **`K1PHPlantNative`**: the plant + command path in C++/CUDA (`Physik C++/`), `policy_step(targets)` |
+| `ph_k1/video.py` | Headless MP4 of the plant (MuJoCo only draws) for W&B |
 | `ph_k1/render.py` | Viewer (drawing only) and energy-tank plots |
 | `checks.py` | Validation suite |
 | `play_volts.py`, `hold_pose.py` | Hand-commanded experiments |
 | `assets/K1/` | Booster K1 MJCF and meshes; `K1_22dof_mjx_prims.xml` = primitive collisions for MJX |
-| `benchmarks/` | Speed of the plant (`benchmark_ph.py`) and of MJX on the same robot (`benchmark_mjx.py`) |
+| `Physik C++/` | The plant and command path in C++ (one source for CPU and CUDA), its build and tests |
+| `benchmarks/` | Speed of the plant (`benchmark_ph.py --impl torch\|native`), MJX on the same robot (`benchmark_mjx.py`), servo hold video (`servo_video.py`) |
 | `kaggle/`, `colab/` | The same benchmarks on a T4 GPU (Kaggle kernel / Colab notebook; both clone this repo) |
 | `docs/` | Figures and notes |
 
-The plant is batched: N robots step in parallel in PyTorch. Measured on CPU: about
-3–4 ms per step for one robot, about 130–200 µs per robot in batches of 64–256.
+The plant is batched: N robots step in parallel. PyTorch on the laptop CPU: about 5 ms per step
+for one robot, ~200 policy steps/s at best. The C++ plant (`K1PHPlantNative`, same numbers to
+round-off): ~30 µs per step for one robot, ~8–9 thousand policy steps/s on the same CPU.
 
 ---
 
@@ -195,13 +200,26 @@ The plant is batched: N robots step in parallel in PyTorch. Measured on CPU: abo
 - **Contact numbers:** `k_n = 3e4` N/m per point (about 0.8 mm sink), `μ = 0.7`. They
   are not identified on the real robot.
 - **No self-collision.** Only body–ground contact and end stops are modelled.
+- **End stops wider than the MJCF range.** The MJCF range is the firmware's command clamp
+  (K1_Deploy `k1_config.h` has the same numbers). The real K1 went past it in its get-ups (head
+  yaw +0.34 rad, elbow yaw ±0.2, ankle roll +0.16, hip roll ±0.1; `docs/robot_compatibility_for_ai.md`),
+  so the end-stop springs sit at the MJCF range ± 0.15 rad (the firmware's own range-check tolerance)
+  and at least 0.05 rad past the measured extremes (`ph_k1/model.py` `MEASURED_RANGE`).
+- **Command path = the robot's, delay not identified.** Policies command 22 joint angles; volts stay
+  inside the simulator. `ph_k1/firmware.py` copies the K1_Deploy chain (position clamp, slew, target
+  clamp, overspeed guard once per 20 ms; the target is held; motor-driver PD every step). The transport
+  delay is randomised, 10–40 ms by default: replaying the 25 Oct front get-up through the plant fits the
+  real joint lags best with no slew and about 20 ms (mean error +5 ms; the hips stay 30–40 ms slower with
+  the trunk fixed in the replay).
 - **First-order integrator.** Standing and slow motion close the energy balance to
   about 0.01 J. Hard impacts at h = 1 ms leave about 10–15% of the impact loss
   unaccounted, 4% at 0.25 ms.
 - **The K1 firmware gains (`--gain 1`) do not keep the robot up.** As an inverted
   pendulum it needs about `m g h ≈ 85 N·m/rad` of ankle stiffness, and two ankles at
   50 N·m/rad each, minus the give of knees and hips, is not enough. This is physics,
-  not a bug, and it is what an RL policy will have to fix.
+  not a bug, and it is what an RL policy will have to fix. MuJoCo with the same gains and
+  torque limits behaves the same: tilt after 3 s 96° / 3.8° / 1.7° / 0.7° at gain 1 / 1.5 / 2 / 3
+  (pH plant: 96° / 4.5° / 2.1° / 0.9°).
 
 ![firmware gains: the robot tips over](docs/firmware_gains_fall.png)
 
