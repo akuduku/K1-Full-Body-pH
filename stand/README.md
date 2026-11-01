@@ -42,9 +42,15 @@ TASK=stand kaggle/run.sh ITERATIONS=3000 RUN_NAME=stand-ph-v1     # Kaggle T4 (G
 TASK=stand kaggle/fetch.sh stand-ph-v1                            # download runs/, logs/
 
 python stand/train.py --device cpu --num-envs 64 --iterations 20 --no-wandb      # local smoke test
+TASK=stand kaggle/run.sh ITERATIONS=2000 RUN_NAME=stand-ph-v1b RESUME=stand-ph-v1   # continue a run
 python stand/eval_mujoco.py --policy outputs/kaggle/stand-ph-v1/runs/stand-ph-v1/deploy_3000.bin --viewer
 python stand/export.py logs/<run>/model_3000.pt deploy.bin
 ```
+
+Kaggle's 12 h session cap: the kernel gives the training the time left minus 20 min, and the training stops
+cleanly before the cap (final checkpoint + `deploy.bin` + artifact, W&B run finished normally). The run folder is
+written directly into the kernel output, so even a hard stop keeps checkpoints and videos. `RESUME=<run>`
+continues from the newest checkpoint of that W&B run in a new session (iteration numbers continue).
 
 W&B: `karl-jahnel-universit-t-leipzig` / **Akos pH Stand**, one run per training: losses, reward terms,
 terminations, energy, a video every 500 iterations, every checkpoint with its `deploy_<it>.bin`, and at the end

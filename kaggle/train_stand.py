@@ -7,17 +7,25 @@ by upload_secrets.sh of the k1-walk repo), or from Kaggle Secrets / the environm
 Steps: GPU + network check -> clone -> install (the preinstalled CUDA torch is kept) -> build the C++/CUDA plant
 -> its tests ON THE GPU (C++ vs Python, the command path, the stand task; training starts only if they pass)
 -> stand/train.py (W&B project WANDB_PROJECT, run RUN_NAME, a video every VIDEO_EVERY iterations, deploy_<it>.bin
-with every checkpoint) -> runs/<RUN_NAME>/ in the kernel output.  kaggle/run.sh overrides the settings below:
+with every checkpoint) -> runs/<RUN_NAME>/ in the kernel output, written there live.
+
+Session limit: the training gets the time left until SESSION_HOURS minus a margin and stops cleanly before Kaggle
+would kill it (final checkpoint + deploy.bin + artifact).  A long training continues in a new session with
+RESUME=<earlier run name> (the newest checkpoint of that W&B run; ITERATIONS then counts the additional ones).
+kaggle/run.sh overrides the settings below:
     TASK=stand kaggle/run.sh ITERATIONS=3000 RUN_NAME=stand-ph-v1
+    TASK=stand kaggle/run.sh ITERATIONS=2000 RUN_NAME=stand-ph-v1b RESUME=stand-ph-v1
 """
 
 import json
 import os
+import time
+
+KERNEL_START = time.time()  # the session clock starts with the kernel
 import shutil
 import socket
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 BRANCH = "native-cuda"                    # git branch of akuduku/K1-Full-Body-pH to train
@@ -30,6 +38,9 @@ WANDB_ENTITY = "karl-jahnel-universit-t-leipzig"
 WANDB_PROJECT = "Akos pH Stand"
 TRAIN_ARGS = ""                           # extra stand/train.py arguments, e.g. "--no-slew --delay-ms 10,30"
 RUN_TESTS = True                          # GPU tests of the plant before training (stop if they fail)
+RESUME = ""                               # W&B run (name or id) in WANDB_PROJECT to continue from; "" = fresh
+SESSION_HOURS = 12.0                      # Kaggle's session cap; the training stops cleanly before it
+MARGIN_MINUTES = 20                       # kept free after the training for the final save and upload
 
 REPO = "https://github.com/akuduku/K1-Full-Body-pH.git"
 WORK = Path("/kaggle/working")
@@ -94,7 +105,8 @@ def reachable(host):
 def main():
     LOGS.mkdir(parents=True, exist_ok=True)
     settings = {k: globals()[k] for k in ("BRANCH", "RUN_NAME", "NUM_ENVS", "ITERATIONS", "VIDEO_EVERY", "SAVE_EVERY",
-                                          "WANDB_ENTITY", "WANDB_PROJECT", "TRAIN_ARGS", "RUN_TESTS")}
+                                          "WANDB_ENTITY", "WANDB_PROJECT", "TRAIN_ARGS", "RUN_TESTS", "RESUME",
+                                          "SESSION_HOURS", "MARGIN_MINUTES")}
     log(json.dumps(settings))
     log(f"network: github {'ok' if reachable('github.com') else 'NO'}, pypi {'ok' if reachable('pypi.org') else 'NO'}")
     github, wandb_key = secret("GITHUB_TOKEN"), secret("WANDB_API_KEY")
@@ -140,15 +152,16 @@ def main():
     # training
     env = {"WANDB_API_KEY": wandb_key, "WANDB_ENTITY": WANDB_ENTITY, "WANDB_USERNAME": WANDB_ENTITY,
            "MUJOCO_GL": "egl", "PYOPENGL_PLATFORM": "egl", "PYTHONUNBUFFERED": "1"}
+    budget = SESSION_HOURS * 60 - (time.time() - KERNEL_START) / 60 - MARGIN_MINUTES
+    log(f"training time budget {budget:.0f} min (session {SESSION_HOURS:g} h, {MARGIN_MINUTES} min margin)")
+    # the run folder IS in the kernel output: checkpoints, deploy.bin and videos are kept even if Kaggle kills it
     cmd = [py, SRC / "stand" / "train.py", "--run-name", RUN_NAME, "--num-envs", NUM_ENVS, "--iterations", ITERATIONS,
            "--video-every", VIDEO_EVERY, "--save-every", SAVE_EVERY, "--wandb-project", WANDB_PROJECT,
-           "--wandb-entity", WANDB_ENTITY, "--log-root", SRC / "logs", *TRAIN_ARGS.split()]
+           "--wandb-entity", WANDB_ENTITY, "--log-root", WORK / "runs", "--max-minutes", f"{max(budget, 1):.1f}",
+           *(["--resume-wandb", RESUME] if RESUME else []), *TRAIN_ARGS.split()]
     start = time.time()
     code = run(cmd, "train.log", env=env, cwd=SRC, check=False)
     log(f"training exit code {code} after {(time.time() - start) / 60:.1f} min")
-    run_dir = SRC / "logs" / RUN_NAME
-    if run_dir.exists():
-        shutil.copytree(run_dir, WORK / "runs" / RUN_NAME, dirs_exist_ok=True)
     if code:
         raise SystemExit(f"training failed (exit code {code}), see logs/train.log")
     log("done")

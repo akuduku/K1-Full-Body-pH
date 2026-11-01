@@ -3,6 +3,10 @@ r"""Train the stand policy on the pH plant with rsl-rl PPO (Kaggle/Colab GPU; a 
     python stand/train.py --num-envs 4096 --iterations 3000 --run-name stand-ph-v1          # GPU
     python stand/train.py --device cpu --num-envs 64 --iterations 20 --no-wandb             # smoke test
 
+Long runs: --max-minutes stops cleanly before a session limit (final checkpoint + deploy.bin + artifact, the W&B
+run finishes normally); --resume-wandb RUN continues from the newest checkpoint of an earlier W&B run (then
+--iterations counts the additional iterations; the iteration numbers continue).
+
 W&B (unless --no-wandb; needs WANDB_API_KEY): entity WANDB_ENTITY (default karl-jahnel-universit-t-leipzig),
 project "Akos pH Stand", run = --run-name.  Logged: every iteration's losses/rewards/terminations/energy, a video
 of the current policy every --video-every iterations (headless MuJoCo drawing, MUJOCO_GL=egl), every checkpoint
@@ -29,6 +33,35 @@ import torch  # noqa: E402
 from stand import contract as C  # noqa: E402
 from stand.env import REWARDS, StandConfig, StandEnv  # noqa: E402
 from stand.export import export_bin  # noqa: E402
+
+
+class TimeBudgetReached(Exception):
+    """Raised after an iteration's log once --max-minutes is used up: rsl-rl's learn loop ends, the checkpoint is
+    saved and the W&B run is finished normally (see the abort hook in main)."""
+
+
+def fetch_wandb_checkpoint(entity: str, project: str, run_ref: str, dest: Path) -> Path:
+    """The newest model_<it>.pt of a W&B run (given by its name or its id), downloaded into dest."""
+    import re
+
+    import wandb
+
+    api = wandb.Api()
+    try:
+        run = api.run(f"{entity}/{project}/{run_ref}")
+    except Exception:
+        runs = api.runs(f"{entity}/{project}", filters={"display_name": run_ref}, order="-created_at")
+        if not len(runs):
+            raise SystemExit(f"no W&B run {run_ref!r} in {entity}/{project}")
+        run = runs[0]
+    found = [(int(m.group(1)), f) for f in run.files() if (m := re.fullmatch(r"model_(\d+)\.pt", f.name))]
+    if not found:
+        raise SystemExit(f"W&B run {run.name} ({run.id}) has no model_<it>.pt yet")
+    it, f = max(found, key=lambda x: x[0])
+    dest.mkdir(parents=True, exist_ok=True)
+    f.download(root=str(dest), replace=True)
+    print(f"[stand] resume from {run.name} ({run.id}) model_{it}.pt", flush=True)
+    return dest / f.name
 
 
 def train_cfg(args) -> dict:
@@ -126,6 +159,10 @@ def main():
     ap.add_argument("--delay-ms", default="10,40", help="transport delay range, ms")
     ap.add_argument("--push-dv", type=float, default=0.3)
     ap.add_argument("--resume", default=None, help="model_<it>.pt to continue from")
+    ap.add_argument("--resume-wandb", default=None,
+                    help="continue from the newest checkpoint of this W&B run (name or id) in --wandb-project")
+    ap.add_argument("--max-minutes", type=float, default=0.0,
+                    help="stop cleanly after this much training time (0 = no limit), e.g. before a session cap")
     ap.add_argument("--log-root", default=str(REPO / "logs"))
     ap.add_argument("--no-wandb", action="store_true")
     ap.add_argument("--wandb-project", default="Akos pH Stand")
@@ -149,8 +186,14 @@ def main():
     runner = OnPolicyRunner(env, tcfg, str(log_dir), device=str(env.device))
     if (REPO / ".git").exists():
         runner.add_git_repo_to_log(str(REPO))
+    if args.resume_wandb:
+        args.resume = str(fetch_wandb_checkpoint(args.wandb_entity, args.wandb_project, args.resume_wandb,
+                                                 log_dir / "resume"))
     if args.resume:
         runner.load(args.resume)
+        print(f"[stand] continuing at iteration {runner.current_learning_iteration}", flush=True)
+
+    t0 = time.time()
 
     # every checkpoint also as the firmware's file, uploaded next to it
     save = runner.save
@@ -191,12 +234,32 @@ def main():
             except Exception:
                 pass
         log(*a, **kw)
+        if args.max_minutes > 0 and (time.time() - t0) / 60 > args.max_minutes:
+            budget["hit"] = it
+            raise TimeBudgetReached(it)
 
     runner.logger.log = log_with_video
 
-    t0 = time.time()
-    runner.learn(num_learning_iterations=args.iterations, init_at_random_ep_len=True)
-    print(f"[stand] {args.iterations} iterations in {(time.time() - t0) / 60:.1f} min", flush=True)
+    # time budget: rsl-rl ends learn() on any exception by aborting the logger; for ours, save the checkpoint
+    # (and its deploy.bin, uploaded) and finish the W&B run normally instead
+    budget = {}
+    abort = runner.logger.abort_logging_writer
+
+    def abort_or_finish():
+        if "hit" in budget:
+            runner.save(str(log_dir / f"model_{runner.current_learning_iteration}.pt"))
+            runner.logger.stop_logging_writer()
+        else:
+            abort()
+
+    runner.logger.abort_logging_writer = abort_or_finish
+
+    try:
+        runner.learn(num_learning_iterations=args.iterations, init_at_random_ep_len=True)
+        print(f"[stand] {args.iterations} iterations in {(time.time() - t0) / 60:.1f} min", flush=True)
+    except TimeBudgetReached:
+        print(f"[stand] time budget of {args.max_minutes:.0f} min used up: stopped cleanly after iteration "
+              f"{budget['hit']}; continue with --resume-wandb {args.run_name}", flush=True)
 
     # the final policy as a W&B artifact on the same run
     finals = sorted(log_dir.glob("deploy_*.bin"), key=lambda p: int(p.stem.split("_")[1]))
