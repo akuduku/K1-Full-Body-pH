@@ -1,8 +1,8 @@
 """The C++ plant (K1PHPlantNative) against the Python references (K1PHPlant, firmware.K1Firmware), step by step.
 
-    cd "Physik C++" && python setup.py build_ext --inplace
-    python -m pytest "Physik C++/tests" -q                     # from the repo root
-    PH_TEST_DEVICE=cuda python -m pytest "Physik C++/tests" -q # on a GPU machine (Kaggle, Colab)
+    cd ph_k1_cuda && python setup.py build_ext --inplace
+    python -m pytest ph_k1_cuda/tests -q                     # from the repo root
+    PH_TEST_DEVICE=cuda python -m pytest ph_k1_cuda/tests -q # on a GPU machine (Kaggle, Colab)
 
 float64 cases must agree to round-off (one step ~1e-13, long trajectories with contact switching
 ~1e-8).  The command-path cases (firmware filter, delay line, motor driver, IMU) are checked against

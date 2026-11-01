@@ -3,8 +3,8 @@
 Proves on the training machine that the native plant, headless rendering and the W&B upload work,
 before any RL runs on it.  Like hold_pose.py, but every policy step is one K1PHPlantNative.policy_step.
 
-    MUJOCO_GL=egl python benchmarks/servo_video.py --device cuda --out outputs/videos/hold_push.mp4
-    WANDB_API_KEY=... python benchmarks/servo_video.py --device cuda --wandb-project "Akos pH"
+    MUJOCO_GL=egl python examples/servo_video.py --device cuda --out outputs/videos/hold_push.mp4
+    WANDB_API_KEY=... python examples/servo_video.py --device cuda --wandb-project "Akos pH"
 """
 
 from __future__ import annotations

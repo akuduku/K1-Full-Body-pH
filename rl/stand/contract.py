@@ -9,7 +9,7 @@ Copied from the robot's software, K1_Deploy firmware (the binary `k1_motion_test
     src/policy_mlp.cpp     the network: 512-256-128 ELU MLP, (x - mean) / (std + 0.01) in front
 
 A policy trained against this module runs on the robot as  k1_motion_test --task stand --policy <file>.bin
-(file from stand/export.py).  The command path after decode (clamp, slew, target clamp, delay, motor driver) is
+(file from rl/stand/export.py).  The command path after decode (clamp, slew, target clamp, delay, motor driver) is
 ph_k1/firmware.py.
 
 Joint orders.  "real" = firmware order = MJCF order = the plant's theta.  The network sees and outputs the

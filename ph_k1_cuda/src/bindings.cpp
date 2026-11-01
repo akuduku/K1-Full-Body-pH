@@ -251,7 +251,7 @@ void run(const torch::Tensor& model, const torch::Tensor& q, const torch::Tensor
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
-    mod.doc() = "K1 port-Hamiltonian plant in C++/CUDA (see Physik C++/README.md)";
+    mod.doc() = "K1 port-Hamiltonian plant in C++/CUDA (see ph_k1_cuda/README.md)";
     mod.def("pack_model", &pack_model, "constants block (uint8 CPU tensor) from the model tensors",
             py::arg("tensors"), py::arg("scalars"), py::arg("ints"), py::arg("use_double"));
     mod.def("run", &run, "advance every robot `nsub` plant steps in place (volts mode, or policy-step mode "

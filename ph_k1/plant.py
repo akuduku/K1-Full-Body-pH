@@ -25,7 +25,7 @@ r"""THE WHOLE K1 AS ONE PORT-HAMILTONIAN SYSTEM.  No mj_step.
 
 The only input is the voltage v (22).  MuJoCo is not called anywhere in this
 file.  `ph_matrices()` builds J, D, G and dH/dx explicitly (autograd for
-dH/dx) so checks.py can prove that the integrator integrates exactly this.
+dH/dx) so validation/checks.py can prove that the integrator integrates exactly this.
 
 INTEGRATOR (one step h, semi-implicit, fixes over the arm plant):
   * forces that depend on the configuration (gravity, dT/dq, gyroscopic,

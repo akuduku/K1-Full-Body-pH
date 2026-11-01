@@ -41,10 +41,10 @@ plant, under delay and pushes.
 TASK=stand kaggle/run.sh ITERATIONS=3000 RUN_NAME=stand-ph-v1     # Kaggle T4 (GPU tests first, then training)
 TASK=stand kaggle/fetch.sh stand-ph-v1                            # download runs/, logs/
 
-python stand/train.py --device cpu --num-envs 64 --iterations 20 --no-wandb      # local smoke test
+python rl/stand/train.py --device cpu --num-envs 64 --iterations 20 --no-wandb      # local smoke test
 TASK=stand kaggle/run.sh ITERATIONS=2000 RUN_NAME=stand-ph-v1b RESUME=stand-ph-v1   # continue a run
-python stand/eval_mujoco.py --policy outputs/kaggle/stand-ph-v1/runs/stand-ph-v1/deploy_3000.bin --viewer
-python stand/export.py logs/<run>/model_3000.pt deploy.bin
+python rl/stand/eval_mujoco.py --policy outputs/kaggle/stand-ph-v1/runs/stand-ph-v1/deploy_3000.bin --viewer
+python rl/stand/export.py logs/<run>/model_3000.pt deploy.bin
 ```
 
 Kaggle's 12 h session cap: the kernel gives the training the time left minus 20 min, and the training stops
@@ -59,7 +59,7 @@ the artifact `k1-stand-ph` (`deploy.bin` + checkpoint).
 ## Tests
 
 ```bash
-python -m pytest stand/tests -q        # contract == obs.h, export == firmware forward pass, env mechanics
+python -m pytest rl/stand/tests -q        # contract == obs.h, export == firmware forward pass, env mechanics
 ```
 
 Baseline (same command path, 20 ms delay, nothing perturbed, action 0): the robot falls after 3.8 s on the pH

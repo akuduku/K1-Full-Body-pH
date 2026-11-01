@@ -26,7 +26,7 @@ dT/dtheta is ANALYTIC (no finite differences, unlike the arm plant):
 
 Derivation: dS_j/dtheta_k = S_k x_m S_j for k before j, and
 dI_b/dtheta_k = S_k x* I_b - I_b S_k x_m; the two contributions cancel down
-to the line above.  checks.py compares it with autograd and with MuJoCo.
+to the line above.  validation/checks.py compares it with autograd and with MuJoCo.
 """
 
 from __future__ import annotations

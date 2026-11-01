@@ -33,7 +33,7 @@ CPU_REF = True                   # same benchmark on Kaggle's CPU, small batches
 MJX = True                       # MJX reference on the same GPU (separate venv)
 MJX_BATCHES = "1024,4096,8192"
 MJX_TIMESTEPS = "0.005,0.001"    # 5 ms = what RL_Core trains with, 1 ms = the pH plant's step
-NATIVE = True                    # build + test + benchmark the C++/CUDA plant (Physik C++)
+NATIVE = True                    # build + test + benchmark the C++/CUDA plant (ph_k1_cuda)
 NATIVE_BATCHES = "256,1024,4096,8192,16384"
 VIDEO = True                     # servo hold + push video of the native plant, to W&B if WANDB_API_KEY is set
 WANDB_ENTITY = "karl-jahnel-universit-t-leipzig"
@@ -278,10 +278,10 @@ def main():
     # 0. the C++/CUDA plant: build (CUDA required), test against the Python plant on the GPU, benchmark
     built = False
     if NATIVE:
-        built = sh([py, "setup.py", "build_ext", "--inplace"], "native_build", cwd=SRC / "Physik C++",
+        built = sh([py, "setup.py", "build_ext", "--inplace"], "native_build", cwd=SRC / "ph_k1_cuda",
                    env={"PH_K1_CUDA": os.environ.get("PH_K1_CUDA", "1")}, check=False) == 0
         if built:
-            sh([py, "-m", "pytest", SRC / "Physik C++" / "tests", "-q", "-p", "no:cacheprovider"], "native_tests",
+            sh([py, "-m", "pytest", SRC / "ph_k1_cuda" / "tests", "-q", "-p", "no:cacheprovider"], "native_tests",
                cwd=SRC, env={"PH_TEST_DEVICE": "cuda"}, check=False)
             sh(common + ["--impl", "native", "--device", "cuda", "--batches", NATIVE_BATCHES, "--dtypes", DTYPES,
                          "--hold-s", HOLD_S, "--json", RESULTS / "ph_native_cuda.json"], "ph_native_cuda", check=False)
@@ -316,7 +316,7 @@ def main():
     summarize()
     # 5. video of the native plant (servo hold + push), to W&B when a key is available
     if VIDEO and built:
-        cmd = [py, SRC / "benchmarks" / "servo_video.py", "--device", "cuda", "--out", WORK / "videos" / "hold_push.mp4",
+        cmd = [py, SRC / "examples" / "servo_video.py", "--device", "cuda", "--out", WORK / "videos" / "hold_push.mp4",
                "--summary", WORK / "summary.json"]
         env = {}
         key = secret("WANDB_API_KEY")

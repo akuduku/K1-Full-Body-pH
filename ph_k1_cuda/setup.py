@@ -1,7 +1,7 @@
 """Build the Python extension ph_k1_native (the K1 pH plant in C++/CUDA).
 
-    cd "Physik C++" && python setup.py build_ext --inplace     # -> ph_k1_native*.so next to this file
-    pip install --no-build-isolation "./Physik C++"            # or install it (needs the torch it runs with)
+    cd ph_k1_cuda && python setup.py build_ext --inplace     # -> ph_k1_native*.so next to this file
+    pip install --no-build-isolation ./ph_k1_cuda            # or install it (needs the torch it runs with)
 
 CUDA is built when nvcc is found (Kaggle, Colab); PH_K1_CUDA=0 forces CPU only, PH_K1_CUDA=1 requires CUDA.
 Architectures: TORCH_CUDA_ARCH_LIST, default "7.5;8.0;8.6;8.9" (T4, A100, A10/RTX 30, L4/RTX 40).

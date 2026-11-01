@@ -14,7 +14,7 @@ as a baseline / teacher for RL).  It is the arm's drive.py for 22 joints:
 Gains: rl_core "contract" profile (plant/motors.py): legs 80/4, ankles
 50/(5.6 pitch, 3.0 roll), arms 10/1, head 4/0.25.
 
-This servo is for the physics checks (checks.py, hold_pose.py).  It is NOT the
+This servo is for the physics checks (validation/checks.py, examples/hold_pose.py).  It is NOT the
 robot's command path: the robot filters a policy's target once per 20 ms
 policy step (per-joint slew, target clamp, overspeed guard), holds it, and
 delays it before the motor driver -- see ph_k1/firmware.py, which RL uses.

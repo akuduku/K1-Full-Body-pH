@@ -19,7 +19,7 @@ K1PHPlant and stays Python.  Differences to K1PHPlant:
   * the parameters (contact, limits, motors, firmware, h, switches) are re-sent to C++ whenever they change
 
 Build once (CPU on the laptop, CUDA where nvcc exists, e.g. Kaggle/Colab):
-    cd "Physik C++" && python setup.py build_ext --inplace
+    cd ph_k1_cuda && python setup.py build_ext --inplace
 """
 
 from __future__ import annotations
@@ -35,12 +35,12 @@ from .dynamics import GRAVITY
 from .model import NJ, NV
 from .plant import K1PHPlant, Ledger, StepInfo
 
-NATIVE_DIR = Path(__file__).resolve().parents[1] / "Physik C++"
+NATIVE_DIR = Path(__file__).resolve().parents[1] / "ph_k1_cuda"
 _LEDGER_FIELDS = [f.name for f in dataclasses.fields(Ledger)]  # supplied, mech_input, copper, gearbox, stops, contact
 
 
 def load_native():
-    """The compiled module ph_k1_native (installed, or built in place in "Physik C++")."""
+    """The compiled module ph_k1_native (installed, or built in place in ph_k1_cuda)."""
     try:
         import ph_k1_native
     except ImportError:

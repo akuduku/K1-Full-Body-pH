@@ -1,6 +1,6 @@
 r"""Stand still on the port-Hamiltonian K1: an rsl-rl VecEnv on K1PHPlantNative.
 
-The task is the firmware's `stand` agent (stand/contract.py): 72 observations the robot can measure, 22 actions
+The task is the firmware's `stand` agent (rl/stand/contract.py): 72 observations the robot can measure, 22 actions
 decoded around the firmware's default pose, the firmware's gains and command path (ph_k1/firmware.py: clamp,
 slew, target clamp, overspeed guard, 10-40 ms delay, motor driver), and the firmware's abort (|roll| or
 |pitch| > 0.6 rad).  The physics underneath is the pH plant: coil currents, torque limits, contact bristles.

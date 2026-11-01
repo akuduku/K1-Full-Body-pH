@@ -10,9 +10,9 @@ With the firmware gains (--gain 1) the robot is a soft inverted pendulum
 of knees and hips) and it slowly tips over -- physically correct, and
 exactly what an RL policy will have to fix.  --gain 3 holds it.
 
-    ../../Presentation/.venv/bin/python hold_pose.py --gain 3 --seconds 10
-    ../../Presentation/.venv/bin/python hold_pose.py --gain 1 --view
-    ../../Presentation/.venv/bin/python hold_pose.py --gain 3 --push 15
+    ../../Presentation/.venv/bin/python examples/hold_pose.py --gain 3 --seconds 10
+    ../../Presentation/.venv/bin/python examples/hold_pose.py --gain 1 --view
+    ../../Presentation/.venv/bin/python examples/hold_pose.py --gain 3 --push 15
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from pathlib import Path
 
 import torch
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parents[1]  # the repo root (this script lives one folder down)
 sys.path.insert(0, str(HERE))
 
 from ph_k1.drive import K1Drive  # noqa: E402

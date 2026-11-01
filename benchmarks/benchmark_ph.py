@@ -40,7 +40,7 @@ def _import_ph(ph_path: Path, impl: str = "torch"):
     from ph_k1.model import load_k1
     from ph_k1.plant import K1PHPlant
 
-    if impl == "native":  # the C++/CUDA plant ("Physik C++"), built with setup.py build_ext --inplace
+    if impl == "native":  # the C++/CUDA plant (ph_k1_cuda), built with setup.py build_ext --inplace
         from ph_k1.native import K1PHPlantNative as K1PHPlant
     return K1PHPlant, K1Drive, load_k1, impl
 
@@ -113,7 +113,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--ph-path", type=Path, default=DEFAULT_PH_PATH, help="folder that contains ph_k1/")
     ap.add_argument("--impl", choices=("torch", "native"), default="torch",
-                    help="torch: ph_k1/plant.py; native: the C++/CUDA plant (Physik C++)")
+                    help="torch: ph_k1/plant.py; native: the C++/CUDA plant (ph_k1_cuda)")
     ap.add_argument("--batches", default="1,16,64,256,1024")
     ap.add_argument("--dtypes", default="float64,float32")
     ap.add_argument("--device", default="cpu")

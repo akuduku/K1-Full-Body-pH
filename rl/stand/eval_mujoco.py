@@ -1,15 +1,15 @@
 r"""Watch a stand policy on the laptop, in MuJoCo: the sim-to-sim check of a policy trained on the pH plant.
 
 The policy file is what the robot would load (deploy_<it>.bin from training, or a model_<it>.pt checkpoint), run
-through the same command path as on the robot (stand/contract.py observation + decode, ph_k1/firmware.py filter,
+through the same command path as on the robot (rl/stand/contract.py observation + decode, ph_k1/firmware.py filter,
 delay line and motor driver).  Only the physics engine differs: MuJoCo's rigid bodies, contacts and integrator
 instead of the pH plant.  For a like-for-like comparison MuJoCo gets the plant's gearbox damping and its end stops
 (the MJCF range widened to what the real robot reached); the motors are torque sources limited by the same
 torque-speed envelope (the pH servo makes the coil current follow the demand, so torque = demand within limits).
 
-    python stand/eval_mujoco.py --policy logs/stand-ph-v1/deploy_3000.bin --viewer
-    python stand/eval_mujoco.py --policy model_3000.pt --seconds 20 --push 0.3 --delay-ms 20
-    python stand/eval_mujoco.py --policy deploy.bin --record outputs/stand_mujoco.mp4      # needs MUJOCO_GL=egl
+    python rl/stand/eval_mujoco.py --policy logs/stand-ph-v1/deploy_3000.bin --viewer
+    python rl/stand/eval_mujoco.py --policy model_3000.pt --seconds 20 --push 0.3 --delay-ms 20
+    python rl/stand/eval_mujoco.py --policy deploy.bin --record outputs/stand_mujoco.mp4      # needs MUJOCO_GL=egl
 
 Prints how long it stood, the largest tilt and whether the firmware's abort (|roll| or |pitch| > 0.6) fired.
 """
@@ -28,14 +28,14 @@ import mujoco.viewer
 import numpy as np
 import torch
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
 from ph_k1.firmware import FirmwareConfig, gains, safety_filter  # noqa: E402
 from ph_k1.model import load_k1  # noqa: E402
 from ph_k1.motors import build_motors  # noqa: E402
-from stand import contract as C  # noqa: E402
-from stand.export import actor_tensors, bin_policy, read_bin  # noqa: E402
+from rl.stand import contract as C  # noqa: E402
+from rl.stand.export import actor_tensors, bin_policy, read_bin  # noqa: E402
 
 
 def load_policy(path: str):

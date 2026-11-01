@@ -1,7 +1,7 @@
 r"""Train the stand policy on the pH plant with rsl-rl PPO (Kaggle/Colab GPU; a CPU smoke run works too).
 
-    python stand/train.py --num-envs 4096 --iterations 3000 --run-name stand-ph-v1          # GPU
-    python stand/train.py --device cpu --num-envs 64 --iterations 20 --no-wandb             # smoke test
+    python rl/stand/train.py --num-envs 4096 --iterations 3000 --run-name stand-ph-v1          # GPU
+    python rl/stand/train.py --device cpu --num-envs 64 --iterations 20 --no-wandb             # smoke test
 
 Long runs: --max-minutes stops cleanly before a session limit (final checkpoint + deploy.bin + artifact, the W&B
 run finishes normally); --resume-wandb RUN continues from the newest checkpoint of an earlier W&B run (then
@@ -25,14 +25,14 @@ from pathlib import Path
 os.environ.setdefault("MUJOCO_GL", "egl")  # before mujoco is imported (ph_k1 imports it)
 os.environ.setdefault("PYOPENGL_PLATFORM", os.environ["MUJOCO_GL"])
 
-REPO = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
 import torch  # noqa: E402
 
-from stand import contract as C  # noqa: E402
-from stand.env import REWARDS, StandConfig, StandEnv  # noqa: E402
-from stand.export import export_bin  # noqa: E402
+from rl.stand import contract as C  # noqa: E402
+from rl.stand.env import REWARDS, StandConfig, StandEnv  # noqa: E402
+from rl.stand.export import export_bin  # noqa: E402
 
 
 class TimeBudgetReached(Exception):

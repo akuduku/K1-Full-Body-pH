@@ -1,6 +1,6 @@
 """The stand task: contract == firmware obs.h, exporter == firmware forward pass, the environment's mechanics.
 
-    python -m pytest stand/tests -q          (needs the built ph_k1_native, rsl-rl-lib and tensordict)
+    python -m pytest rl/stand/tests -q          (needs the built ph_k1_native, rsl-rl-lib and tensordict)
 """
 
 from __future__ import annotations
@@ -13,11 +13,11 @@ import numpy as np
 import pytest
 import torch
 
-REPO = Path(__file__).resolve().parents[2]
+REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 
 from ph_k1.model import NJ, load_k1  # noqa: E402
-from stand import contract as C  # noqa: E402
+from rl.stand import contract as C  # noqa: E402
 
 DEVICE = os.environ.get("PH_TEST_DEVICE", "cpu")
 if DEVICE == "cuda" and not torch.cuda.is_available():
@@ -74,7 +74,7 @@ def test_export_round_trip(tmp_path):
     from tensordict import TensorDict
 
     from rsl_rl.models import MLPModel
-    from stand.export import bin_policy, export_bin, read_bin
+    from rl.stand.export import bin_policy, export_bin, read_bin
 
     torch.manual_seed(1)
     obs = TensorDict({"policy": torch.randn(64, C.OBS_DIM)}, batch_size=[64])
@@ -102,7 +102,7 @@ def test_export_round_trip(tmp_path):
 @pytest.fixture(scope="module")
 def env():
     pytest.importorskip("tensordict")
-    from stand.env import StandConfig, StandEnv
+    from rl.stand.env import StandConfig, StandEnv
 
     return StandEnv(StandConfig(num_envs=8, device=DEVICE, dtype="float32", push_dv=0.0))
 

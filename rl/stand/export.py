@@ -5,7 +5,7 @@ per matrix  int32 name_len | name | int32 rows | int32 cols | float64 row-major 
 actor.0/2/4/6.weight/bias (512-256-128-22, ELU between) and obs_normalizer._mean / _std; the firmware applies
 (x - mean) / (std + 0.01), the same as rsl-rl's EmpiricalNormalization.
 
-    python stand/export.py logs/<run>/model_3000.pt logs/<run>/deploy.bin
+    python rl/stand/export.py logs/<run>/model_3000.pt logs/<run>/deploy.bin
     # on the robot:  k1_motion_test --task stand --policy deploy.bin
 """
 
@@ -22,8 +22,8 @@ import torch
 try:
     from . import contract as C
 except ImportError:  # run as a script
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from stand import contract as C
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from rl.stand import contract as C
 
 
 def actor_tensors(checkpoint: str | Path | dict):

@@ -4,9 +4,9 @@
 Every check prints PASS/FAIL with the number it measured.
 
     cd "RL Policy for pH/Full Body"
-    ../../Presentation/.venv/bin/python checks.py            # all
-    ../../Presentation/.venv/bin/python checks.py mujoco arm # some
-    python checks.py --impl native                           # the same checks with the C++ plant
+    ../../Presentation/.venv/bin/python validation/checks.py            # all
+    ../../Presentation/.venv/bin/python validation/checks.py mujoco arm # some
+    python validation/checks.py --impl native                           # the same checks with the C++ plant
 
  1  mass      M(q) == MuJoCo mj_fullM, frames == MuJoCo xpos  (random q)
  2  gradient  analytic dT/dtheta == autograd                  (random q, nu)
@@ -34,7 +34,7 @@ import mujoco
 import numpy as np
 import torch
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parents[1]  # the repo root (this script lives one folder down)
 sys.path.insert(0, str(HERE))
 
 from ph_k1.dynamics import forward_kinematics, kinetic_gradient  # noqa: E402
@@ -43,7 +43,7 @@ from ph_k1.motors import DATASHEET, build_motors  # noqa: E402
 from ph_k1.plant import K1PHPlant  # noqa: E402
 
 IMPL = "python"
-if "--impl" in sys.argv:  # --impl native: every check steps the C++ plant ("Physik C++")
+if "--impl" in sys.argv:  # --impl native: every check steps the C++ plant (ph_k1_cuda)
     _i = sys.argv.index("--impl")
     IMPL = sys.argv[_i + 1]
     del sys.argv[_i : _i + 2]

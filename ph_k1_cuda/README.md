@@ -68,7 +68,7 @@ trunk). The end stops are wider than the MJCF range, because the robot went past
 ## Build
 
 ```bash
-cd "Physik C++" && python setup.py build_ext --inplace       # -> ph_k1_native*.so next to setup.py
+cd ph_k1_cuda && python setup.py build_ext --inplace       # -> ph_k1_native*.so next to setup.py
 ```
 
 CUDA is built when nvcc exists (Kaggle, Colab), CPU-only otherwise (this laptop). `PH_K1_CUDA=1` requires
@@ -91,14 +91,14 @@ info = plant.step(volts)                 # or the plant alone: one plant step wi
 ```
 
 `K1PHPlantNative` is a subclass of `K1PHPlant`: `reset`, `kinematics`, `velocity`, `energy`, `ledger`,
-`ph_matrices` work as before. `python checks.py --impl native` runs the whole validation suite with it.
+`ph_matrices` work as before. `python validation/checks.py --impl native` runs the whole validation suite with it.
 
 ## Tests and results
 
 ```bash
-python -m pytest "Physik C++/tests" -q                       # 14 tests: C++ vs Python, float64, CPU
-PH_TEST_DEVICE=cuda python -m pytest "Physik C++/tests" -q   # the same on a GPU
-python checks.py --impl native                               # 9/9 PASS
+python -m pytest ph_k1_cuda/tests -q                       # 14 tests: C++ vs Python, float64, CPU
+PH_TEST_DEVICE=cuda python -m pytest ph_k1_cuda/tests -q   # the same on a GPU
+python validation/checks.py --impl native                               # 9/9 PASS
 python benchmarks/benchmark_ph.py --impl native              # speed
 ```
 

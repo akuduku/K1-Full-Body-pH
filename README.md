@@ -7,12 +7,35 @@ used for only three things:
 
 1. reading the robot description (MJCF) once: masses, inertias, axes, armature, joint ranges, collision boxes;
 2. drawing the robot (`mj_kinematics` in the viewer);
-3. serving as the reference our numbers are checked against (`checks.py`).
+3. serving as the reference our numbers are checked against (`validation/checks.py`).
 
 Part of the master thesis *Physics-informed Reinforcement Learning for Soccer
-Robots* (Akos Eross, HTWK Leipzig). This repository is the **physics phase**: the
-plant is built and validated with voltages chosen by hand (scripts or a classical
-servo). RL training on top of it is the next phase.
+Robots* (Akos Eross, HTWK Leipzig). The repository has two halves:
+- **the physics**: the pH plant in Python (`ph_k1/`, the reference) and in C++/CUDA (`ph_k1_cuda/`, the same
+  numbers, fast enough to train on), with the robot's firmware command path, validated in `validation/`;
+- **the RL training** on top of it (`rl/`): first skill `rl/stand/`, trained on Kaggle GPUs and exported as
+  the firmware's `stand` agent.
+
+## Where is what
+
+```
+ph_k1/          PHYSICS, Python reference: model, dynamics, motors, contact, plant (H, J, D, G),
+                firmware command path, native.py = the C++/CUDA plant behind the same interface
+ph_k1_cuda/     PHYSICS, C++/CUDA: include/ph_k1 (the physics), src (CPU, CUDA, Python bindings), tests
+validation/     checks.py: the physics against MuJoCo, autograd and the datasheets (9 checks)
+examples/       hand-commanded experiments: play_volts, hold_pose, servo_video
+benchmarks/     speed: pH plant (torch / native) vs MJX
+rl/             RL TRAINING on the pH plant
+  stand/        stand still under pushes: contract (= firmware obs/actions), env, train (PPO + W&B),
+                export (-> deploy.bin for the robot), eval_mujoco (laptop sim-to-sim check), tests
+kaggle/         GPU runs that clone this repo: TASK=stand kaggle/run.sh (training), kaggle/run.sh (benchmark)
+colab/          the benchmark as a Colab notebook
+assets/K1/      Booster K1 MJCF + meshes
+docs/           figures and notes (robot_compatibility_for_ai.md: what transfers to the real robot)
+```
+
+The RL side only talks to the physics through `K1PHPlantNative.policy_step(targets)`: 22 joint targets
+every 20 ms, the same way the real K1 is commanded.
 
 ![servo hold with a sideways push](docs/servo_hold_push.png)
 
@@ -109,17 +132,21 @@ create it.
 ## Install and run
 
 ```bash
-git clone https://github.com/akuduku/K1-Full-Body-pH.git
-cd K1-Full-Body-pH
+git clone https://gitea.naoserv.imn.htwk-leipzig.de/akos.eross/Port-Hamiltonien.git   # or GitHub akuduku/K1-Full-Body-pH
+cd Port-Hamiltonien
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-python checks.py                              # validation, about 1 min
-python play_volts.py joints --view            # each joint group gets a voltage ramp (trunk welded)
-python play_volts.py drop                     # dropped from 5 cm with 0 V (shorted coils)
-python hold_pose.py --gain 3 --seconds 10     # classical servo holds the stand pose
-python hold_pose.py --gain 3 --push 20        # ... and is knocked sideways at 20 cm/s
-python hold_pose.py --gain 1 --view           # firmware gains: tips over (see "Limits")
+python validation/checks.py                            # validation, about 1 min
+python examples/play_volts.py joints --view            # each joint group gets a voltage ramp (trunk welded)
+python examples/play_volts.py drop                     # dropped from 5 cm with 0 V (shorted coils)
+python examples/hold_pose.py --gain 3 --seconds 10     # classical servo holds the stand pose
+python examples/hold_pose.py --gain 3 --push 20        # ... and is knocked sideways at 20 cm/s
+python examples/hold_pose.py --gain 1 --view           # firmware gains: tips over (see "Limits")
+
+cd ph_k1_cuda && python setup.py build_ext --inplace && cd ..   # the C++ plant (CUDA where nvcc exists)
+python -m pytest ph_k1_cuda/tests rl/stand/tests -q             # C++ == Python reference, stand task
+TASK=stand kaggle/run.sh ITERATIONS=3000 RUN_NAME=stand-ph-v1   # train the stand policy on a Kaggle T4
 ```
 
 Plots (energy tanks, ledger, trunk height and tilt) and CSVs are written to
@@ -137,7 +164,7 @@ plant.ph_matrices()                   # explicit J, D, G, ∇H for robot 0
 
 ---
 
-## Repository layout
+## Files
 
 | Path | Content |
 |---|---|
@@ -149,15 +176,15 @@ plant.ph_matrices()                   # explicit J, D, G, ∇H for robot 0
 | `ph_k1/plant.py` | **`K1PHPlant`**: state, `step(volts)`, `energy()`, energy ledger, `ph_matrices()` |
 | `ph_k1/drive.py` | Classical servo of the physics checks: target angles → volts (not the robot's path) |
 | `ph_k1/firmware.py` | **The robot's command path** (K1_Deploy firmware): filter, delay line, motor driver, IMU; Python reference |
-| `ph_k1/native.py` | **`K1PHPlantNative`**: the plant + command path in C++/CUDA (`Physik C++/`), `policy_step(targets)` |
+| `ph_k1/native.py` | **`K1PHPlantNative`**: the plant + command path in C++/CUDA (`ph_k1_cuda/`), `policy_step(targets)` |
 | `ph_k1/video.py` | Headless MP4 of the plant (MuJoCo only draws) for W&B |
 | `ph_k1/render.py` | Viewer (drawing only) and energy-tank plots |
-| `checks.py` | Validation suite |
-| `play_volts.py`, `hold_pose.py` | Hand-commanded experiments |
+| `ph_k1_cuda/` | The plant and command path in C++ (one source for CPU and CUDA), its build and tests |
+| `validation/checks.py` | Validation suite |
+| `examples/` | Hand-commanded experiments: `play_volts.py`, `hold_pose.py`, `servo_video.py` (servo hold video for W&B) |
+| `benchmarks/` | Speed of the plant (`benchmark_ph.py --impl torch\|native`), MJX on the same robot (`benchmark_mjx.py`) |
+| `rl/stand/` | **Stand policy** on the pH plant, as the firmware's `stand` agent: env, rsl-rl training (Kaggle), export to the robot's `.bin`, MuJoCo check |
 | `assets/K1/` | Booster K1 MJCF and meshes; `K1_22dof_mjx_prims.xml` = primitive collisions for MJX |
-| `Physik C++/` | The plant and command path in C++ (one source for CPU and CUDA), its build and tests |
-| `stand/` | **Stand policy** on the pH plant, as the firmware's `stand` agent: env, rsl-rl training (Kaggle), export to the robot's `.bin`, MuJoCo check |
-| `benchmarks/` | Speed of the plant (`benchmark_ph.py --impl torch\|native`), MJX on the same robot (`benchmark_mjx.py`), servo hold video (`servo_video.py`) |
 | `kaggle/`, `colab/` | GPU runs that clone this repo: the benchmark (`kaggle/run.sh`, Colab notebook) and the stand training (`TASK=stand kaggle/run.sh`) |
 | `docs/` | Figures and notes |
 
@@ -167,7 +194,7 @@ round-off): ~30 µs per step for one robot, ~8–9 thousand policy steps/s on th
 
 ---
 
-## Validation (`checks.py`)
+## Validation (`validation/checks.py`)
 
 | # | Check | Result |
 |---|---|---|
@@ -240,11 +267,9 @@ integrates them.
 - replaces the MuJoCo contact oracle with pH contact elements;
 - computes `∂M/∂q` analytically instead of with finite differences.
 
-**Next phase (RL):** wrap `K1PHPlant` in an environment with these properties:
-- **Action:** 22 voltages at 50 Hz.
-- **Observation:** gravity direction, ω, θ, θ̇, i.
-- **Reward:** upright and height, with an electrical-power penalty `vᵀi`.
-
-`ph_k1/drive.py` can serve as the teacher or baseline.
+**RL on the plant (`rl/`):** the robot has no voltage input, so a policy commands what the real K1
+takes: 22 joint targets at 50 Hz, through the firmware command path inside the plant. The volts stay in
+the simulator, and so does the energy ledger, which the reward can use (`rl/stand`: copper loss R·i²).
+See `rl/stand/README.md` and `docs/robot_compatibility_for_ai.md`.
 
 The Booster K1 model files in `assets/K1/` come from Booster Robotics.

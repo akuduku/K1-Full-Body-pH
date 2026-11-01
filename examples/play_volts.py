@@ -9,8 +9,8 @@ Scenarios
   custom   your own table: edit SCHEDULE below
 
     cd "RL Policy for pH/Full Body"
-    ../../Presentation/.venv/bin/python play_volts.py joints --view
-    ../../Presentation/.venv/bin/python play_volts.py drop --seconds 3
+    ../../Presentation/.venv/bin/python examples/play_volts.py joints --view
+    ../../Presentation/.venv/bin/python examples/play_volts.py drop --seconds 3
 
 Writes outputs/<scenario>.csv and outputs/<scenario>.png (energy tanks).
 """
@@ -24,7 +24,7 @@ from pathlib import Path
 
 import torch
 
-HERE = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parents[1]  # the repo root (this script lives one folder down)
 sys.path.insert(0, str(HERE))
 
 from ph_k1.model import NJ  # noqa: E402

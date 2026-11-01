@@ -1,4 +1,4 @@
-"""Kaggle kernel: train the stand policy on the pH plant (stand/train.py) on a T4, with W&B.
+"""Kaggle kernel: train the stand policy on the pH plant (rl/stand/train.py) on a T4, with W&B.
 
 The code comes from git: this repo (akuduku/K1-Full-Body-pH, private) is cloned at BRANCH with GITHUB_TOKEN; the
 W&B key is WANDB_API_KEY.  Both come from the private dataset <user>/k1-secrets (attached by kaggle/run.sh; made
@@ -6,7 +6,7 @@ by upload_secrets.sh of the k1-walk repo), or from Kaggle Secrets / the environm
 
 Steps: GPU + network check -> clone -> install (the preinstalled CUDA torch is kept) -> build the C++/CUDA plant
 -> its tests ON THE GPU (C++ vs Python, the command path, the stand task; training starts only if they pass)
--> stand/train.py (W&B project WANDB_PROJECT, run RUN_NAME, a video every VIDEO_EVERY iterations, deploy_<it>.bin
+-> rl/stand/train.py (W&B project WANDB_PROJECT, run RUN_NAME, a video every VIDEO_EVERY iterations, deploy_<it>.bin
 with every checkpoint) -> runs/<RUN_NAME>/ in the kernel output, written there live.
 
 Session limit: the training gets the time left until SESSION_HOURS minus a margin and stops cleanly before Kaggle
@@ -36,7 +36,7 @@ VIDEO_EVERY = 500
 SAVE_EVERY = 250
 WANDB_ENTITY = "karl-jahnel-universit-t-leipzig"
 WANDB_PROJECT = "Akos pH Stand"
-TRAIN_ARGS = ""                           # extra stand/train.py arguments, e.g. "--no-slew --delay-ms 10,30"
+TRAIN_ARGS = ""                           # extra rl/stand/train.py arguments, e.g. "--no-slew --delay-ms 10,30"
 RUN_TESTS = True                          # GPU tests of the plant before training (stop if they fail)
 RESUME = ""                               # W&B run (name or id) in WANDB_PROJECT to continue from; "" = fresh
 SESSION_HOURS = 12.0                      # Kaggle's session cap; the training stops cleanly before it
@@ -139,10 +139,10 @@ def main():
         check=False)
 
     # the C++/CUDA plant
-    run([py, "setup.py", "build_ext", "--inplace"], "build.log", cwd=SRC / "Physik C++",
+    run([py, "setup.py", "build_ext", "--inplace"], "build.log", cwd=SRC / "ph_k1_cuda",
         env={"PH_K1_CUDA": os.environ.get("PH_K1_CUDA", "1")})  # CUDA required (a local CPU test sets 0)
     if RUN_TESTS:
-        code = run([py, "-m", "pytest", SRC / "Physik C++" / "tests", SRC / "stand" / "tests", "-q",
+        code = run([py, "-m", "pytest", SRC / "ph_k1_cuda" / "tests", SRC / "rl" / "stand" / "tests", "-q",
                     "-p", "no:cacheprovider"], "tests.log", cwd=SRC,
                    env={"PH_TEST_DEVICE": os.environ.get("PH_TEST_DEVICE", "cuda")}, check=False)
         if code:
@@ -155,7 +155,7 @@ def main():
     budget = SESSION_HOURS * 60 - (time.time() - KERNEL_START) / 60 - MARGIN_MINUTES
     log(f"training time budget {budget:.0f} min (session {SESSION_HOURS:g} h, {MARGIN_MINUTES} min margin)")
     # the run folder IS in the kernel output: checkpoints, deploy.bin and videos are kept even if Kaggle kills it
-    cmd = [py, SRC / "stand" / "train.py", "--run-name", RUN_NAME, "--num-envs", NUM_ENVS, "--iterations", ITERATIONS,
+    cmd = [py, SRC / "rl" / "stand" / "train.py", "--run-name", RUN_NAME, "--num-envs", NUM_ENVS, "--iterations", ITERATIONS,
            "--video-every", VIDEO_EVERY, "--save-every", SAVE_EVERY, "--wandb-project", WANDB_PROJECT,
            "--wandb-entity", WANDB_ENTITY, "--log-root", WORK / "runs", "--max-minutes", f"{max(budget, 1):.1f}",
            *(["--resume-wandb", RESUME] if RESUME else []), *TRAIN_ARGS.split()]

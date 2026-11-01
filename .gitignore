@@ -5,9 +5,9 @@ outputs/
 .mplconfig/
 
 # C++/CUDA extension build output
-Physik C++/build/
-Physik C++/*.so
+ph_k1_cuda/build/
+ph_k1_cuda/*.so
 *.egg-info/
-# training runs (stand/train.py)
+# training runs (rl/stand/train.py)
 logs/
 wandb/
