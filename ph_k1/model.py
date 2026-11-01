@@ -51,7 +51,7 @@ HOME_POSE = {
 
 # Joint angles the real K1 (Phobos) reached in its two get-ups, min/max over getup_2236.csv and
 # getup_front_2250.csv (Karls Repo/Logs/30102026, 25 Oct 2026, 500 Hz).  Several lie outside the MJCF range
-# (docs/robot_compatibility_for_ai.md): the MJCF range is the FIRMWARE's command clamp (K1_Deploy
+# -- the MJCF range is the FIRMWARE's command clamp (K1_Deploy
 # k1_config.h joint_pos_lower/upper are the same numbers), not the mechanical stop.
 MEASURED_RANGE = {
     "AAHead_yaw": (-0.718, 1.343), "Head_pitch": (-0.413, 0.753),

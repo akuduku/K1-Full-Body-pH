@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import torch
 
-# MJCF / firmware joint order (k1_config.h "firmware joint order"; docs/robot_compatibility_for_ai.md)
+# MJCF / firmware joint order (K1_Deploy k1_config.h "firmware joint order")
 JOINT_NAMES = (
     "AAHead_yaw", "Head_pitch",
     "ALeft_Shoulder_Pitch", "Left_Shoulder_Roll", "Left_Elbow_Pitch", "Left_Elbow_Yaw",

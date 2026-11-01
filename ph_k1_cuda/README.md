@@ -63,7 +63,7 @@ plant with the trunk fixed; best-fit command → joint lag over the 12 most-move
 So that get-up ran without the slew limiter and with about 20 ms transport delay; the arms then match within
 a few ms, the hips stay 30–40 ms slower (the legs pushed on the floor in the real get-up; the replay holds the
 trunk). The end stops are wider than the MJCF range, because the robot went past it (`ph_k1/model.py`
-`MEASURED_RANGE`, `docs/robot_compatibility_for_ai.md`).
+`MEASURED_RANGE`, from the real get-up logs).
 
 ## Build
 

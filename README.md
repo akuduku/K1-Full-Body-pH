@@ -36,7 +36,7 @@ rl/             RL TRAINING on the pH plant
 kaggle/         GPU runs that clone this repo: TASK=stand kaggle/run.sh (training), kaggle/run.sh (benchmark)
 colab/          colab-train job k1-getup.yaml + setup_gpu.sh (the get-up training), the benchmark notebook
 assets/K1/      Booster K1 MJCF + meshes
-docs/           figures and notes (robot_compatibility_for_ai.md: what transfers to the real robot)
+docs/           figures used in this README
 ```
 
 The RL side only talks to the physics through `K1PHPlantNative.policy_step(targets, kp, kd)`: 22 joint
@@ -240,7 +240,7 @@ round-off): ~30 µs per step for one robot, ~8–9 thousand policy steps/s on th
 - **No self-collision.** Only body–ground contact and end stops are modelled.
 - **End stops wider than the MJCF range.** The MJCF range is the firmware's command clamp
   (K1_Deploy `k1_config.h` has the same numbers). The real K1 went past it in its get-ups (head
-  yaw +0.34 rad, elbow yaw ±0.2, ankle roll +0.16, hip roll ±0.1; `docs/robot_compatibility_for_ai.md`),
+  yaw +0.34 rad, elbow yaw ±0.2, ankle roll +0.16, hip roll ±0.1; the logs `getup_2236.csv`, `getup_front_2250.csv`),
   so the end-stop springs sit at the MJCF range ± 0.15 rad (the firmware's own range-check tolerance)
   and at least 0.05 rad past the measured extremes (`ph_k1/model.py` `MEASURED_RANGE`).
 - **Command path = the robot's, delay not identified.** Policies command 22 joint angles; volts stay
@@ -267,9 +267,8 @@ round-off): ~30 µs per step for one robot, ~8–9 thousand policy steps/s on th
 
 The predecessor code moved the robot with MuJoCo (`mj_step`). Its "port-Hamiltonian"
 parts (twist and wrench ports, motor port, a `hamiltonian` observation) were only an
-energy log on top of that. `docs/miert-nem-ph-fizika.pdf` explains this (in
-Hungarian). This repository writes out H, J, D and G for the full robot and
-integrates them.
+energy log on top of that: the physics was still MuJoCo's. This repository writes
+out H, J, D and G for the full robot and integrates them.
 
 **Compared with the earlier right-arm pH plant**, the full-body plant:
 - solves the gyrator coupling implicitly instead of with forward Euler;
@@ -280,6 +279,6 @@ integrates them.
 **RL on the plant (`rl/`):** the robot has no voltage input, so a policy commands what the real K1
 takes: 22 joint targets at 50 Hz, through the firmware command path inside the plant. The volts stay in
 the simulator, and so does the energy ledger, which the reward can use (`rl/stand`: copper loss R·i²).
-See `rl/stand/README.md` and `docs/robot_compatibility_for_ai.md`.
+See `rl/stand/README.md` and `rl/getup/README.md`.
 
 The Booster K1 model files in `assets/K1/` come from Booster Robotics.

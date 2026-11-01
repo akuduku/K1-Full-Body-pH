@@ -22,4 +22,8 @@ wandb/
 *.fls
 *.fdb_latexmk
 *.synctex.gz
-docs/presentation/*.log
+# personal notes, slides and analyses: kept on the laptop only, not shared
+docs/presentation/
+docs/miert-nem-ph-fizika.pdf
+docs/robot_compatibility_for_ai.md
+ph-layer-for-rl.pdf
