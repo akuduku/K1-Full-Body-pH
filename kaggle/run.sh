@@ -1,9 +1,10 @@
 #!/bin/bash
-# Push the benchmark kernel <user>/ph-k1-bench. The kernel clones this repo from GitHub at BRANCH,
-# so commit and push first: the run sees only what is on GitHub.
-#   kaggle/run.sh                              (BRANCH = the current branch)
+# Push a kernel that clones this repo from GitHub at BRANCH (commit and push first: the run sees only GitHub).
+#   kaggle/run.sh                                         benchmark kernel <user>/ph-k1-bench (bench_kaggle.py)
 #   kaggle/run.sh BATCHES=1024,4096 MJX=0
-#   DRY_RUN=1 kaggle/run.sh ...                (show the staged kernel, push nothing)
+#   TASK=stand kaggle/run.sh                              stand training <user>/ph-k1-stand (train_stand.py)
+#   TASK=stand kaggle/run.sh ITERATIONS=3000 RUN_NAME=stand-ph-v1
+#   DRY_RUN=1 kaggle/run.sh ...                           (show the staged kernel, push nothing)
 set -euo pipefail
 . "$(dirname "$0")/common.sh"
 
@@ -18,16 +19,17 @@ echo "kernel clones $want @ $(git -C "$REPO" rev-parse --short "origin/$want")"
 
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
-cp "$KIT_DIR/bench_kaggle.py" "$KIT_DIR/kernel-metadata.json" "$STAGE/"
-python3 - "$STAGE" "$KAGGLE_USER" "$KERNEL_SLUG" "$@" <<'PY'
+cp "$KIT_DIR/$SCRIPT" "$KIT_DIR/kernel-metadata.json" "$STAGE/"
+python3 - "$STAGE" "$KAGGLE_USER" "$KERNEL_SLUG" "$SCRIPT" "$@" <<'PY'
 import json, os, re, sys
 from pathlib import Path
 
-stage, user, slug, *pairs = sys.argv[1:]
+stage, user, slug, code_file, *pairs = sys.argv[1:]
 stage = Path(stage)
-script = (stage / "bench_kaggle.py").read_text()
+script = (stage / code_file).read_text()
 meta = json.loads((stage / "kernel-metadata.json").read_text())
 meta["id"] = f"{user}/{slug}"
+meta["code_file"] = code_file
 meta["title"] = slug
 # the keys only (upload_secrets.sh of the k1-walk repo); the code comes from git
 secrets = os.environ.get("SECRETS_DATASET", f"{user}/k1-secrets")
@@ -48,10 +50,10 @@ for pair in pairs:
         new = str(int(value))
     script = script[:line.start(1)] + new + script[line.end(1):]
     print(f"{key} = {new}")
-(stage / "bench_kaggle.py").write_text(script)
+(stage / code_file).write_text(script)
 (stage / "kernel-metadata.json").write_text(json.dumps(meta, indent=2) + "\n")
 PY
-timeout=${TIMEOUT:-5400}   # 90 min: install + benchmarks + MJX compile
-if [ -n "${DRY_RUN:-}" ]; then diff "$KIT_DIR/bench_kaggle.py" "$STAGE/bench_kaggle.py" || true; cat "$STAGE/kernel-metadata.json"; exit; fi
+timeout=${TIMEOUT:-$DEFAULT_TIMEOUT}   # bench 90 min, stand 12 h (Kaggle's session cap)
+if [ -n "${DRY_RUN:-}" ]; then diff "$KIT_DIR/$SCRIPT" "$STAGE/$SCRIPT" || true; cat "$STAGE/kernel-metadata.json"; exit; fi
 "$KAGGLE" kernels push -p "$STAGE" --accelerator NvidiaTeslaT4 -t "$timeout"
-echo "pushed https://www.kaggle.com/code/$KERNEL (timeout ${timeout}s); fetch with kaggle/fetch.sh"
+echo "pushed https://www.kaggle.com/code/$KERNEL (timeout ${timeout}s); fetch with TASK=$TASK kaggle/fetch.sh"

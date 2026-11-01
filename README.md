@@ -156,8 +156,9 @@ plant.ph_matrices()                   # explicit J, D, G, ∇H for robot 0
 | `play_volts.py`, `hold_pose.py` | Hand-commanded experiments |
 | `assets/K1/` | Booster K1 MJCF and meshes; `K1_22dof_mjx_prims.xml` = primitive collisions for MJX |
 | `Physik C++/` | The plant and command path in C++ (one source for CPU and CUDA), its build and tests |
+| `stand/` | **Stand policy** on the pH plant, as the firmware's `stand` agent: env, rsl-rl training (Kaggle), export to the robot's `.bin`, MuJoCo check |
 | `benchmarks/` | Speed of the plant (`benchmark_ph.py --impl torch\|native`), MJX on the same robot (`benchmark_mjx.py`), servo hold video (`servo_video.py`) |
-| `kaggle/`, `colab/` | The same benchmarks on a T4 GPU (Kaggle kernel / Colab notebook; both clone this repo) |
+| `kaggle/`, `colab/` | GPU runs that clone this repo: the benchmark (`kaggle/run.sh`, Colab notebook) and the stand training (`TASK=stand kaggle/run.sh`) |
 | `docs/` | Figures and notes |
 
 The plant is batched: N robots step in parallel. PyTorch on the laptop CPU: about 5 ms per step

@@ -1,6 +1,7 @@
 #!/bin/bash
-# Wait for <user>/ph-k1-bench to finish, download its output to outputs/kaggle/<name>/ and print the summary.
-#   kaggle/fetch.sh [name]      (name defaults to a timestamp)
+# Wait for the kernel to finish, download its output to outputs/kaggle/<name>/ and print the summary.
+#   kaggle/fetch.sh [name]                (the benchmark kernel; name defaults to a timestamp)
+#   TASK=stand kaggle/fetch.sh [name]     (the stand training)
 set -euo pipefail
 . "$(dirname "$0")/common.sh"
 OUT="$REPO/outputs/kaggle/${1:-$(date +%Y%m%d-%H%M)}"

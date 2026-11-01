@@ -40,6 +40,7 @@ INTEGRATOR (one step h, semi-implicit, fixes over the arm plant):
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 
 import torch
@@ -130,28 +131,45 @@ class K1PHPlant:
         base_pos=(0.0, 0.0, None),
         base_quat=(1.0, 0.0, 0.0, 0.0),
         clearance: float = 0.0,
+        env_ids: torch.Tensor | None = None,
     ) -> None:
-        """Zero momentum and current.  base z=None: put the soles on the ground."""
+        """Zero momentum and current.  base z=None: put the soles on the ground.
+
+        env_ids: reset only these robots (the others are untouched, the clock keeps running).  pose may then be
+        one (22,) vector or one row per robot (n, 22); base_quat one quaternion or (n, 4).
+        """
         m, B = self.model, self.B
+        dev, dt = self.device, self.dtype
+        rows = None if env_ids is None else torch.as_tensor(env_ids, device=dev).long().reshape(-1)
+        n = B if rows is None else int(rows.numel())
         if pose is None:
             pose = HOME_POSE
-        theta = pose if isinstance(pose, torch.Tensor) else m.pose_vector(pose)
-        q = torch.zeros(B, NQ, dtype=self.dtype, device=self.device)
-        q[:, 3:7] = torch.tensor(base_quat, dtype=self.dtype, device=self.device)
+        theta = pose.to(device=dev, dtype=dt) if isinstance(pose, torch.Tensor) else m.pose_vector(pose)
+        q = torch.zeros(n, NQ, dtype=dt, device=dev)
+        q[:, 3:7] = torch.as_tensor(base_quat, dtype=dt, device=dev)
         q[:, 7:] = theta
         x, y, z = base_pos
         q[:, 0], q[:, 1] = x, y
         q[:, 2] = 0.0 if z is None else z
-        if z is None and not self.fixed_base:
+        if z is None and not self.fixed_base and n > 0:
             kin = forward_kinematics(m, q)
             pc = self._sole_points(kin)
             q[:, 2] = -pc[..., 2].min(-1).values + clearance
-        self.q = q
-        self.p = torch.zeros(B, NV, dtype=self.dtype, device=self.device)
-        self.xi = torch.zeros(B, m.ncontact, 2, dtype=self.dtype, device=self.device)
-        self.lam = torch.zeros(B, NJ, dtype=self.dtype, device=self.device)
-        self.time = 0.0
-        self.ledger = Ledger.zeros(B, self.dtype, self.device)
+        if rows is None:
+            self.q = q
+            self.p = torch.zeros(B, NV, dtype=dt, device=dev)
+            self.xi = torch.zeros(B, m.ncontact, 2, dtype=dt, device=dev)
+            self.lam = torch.zeros(B, NJ, dtype=dt, device=dev)
+            self.time = 0.0
+            self.ledger = Ledger.zeros(B, dt, dev)
+            return
+        self.q[rows] = q
+        self.p[rows] = 0.0
+        self.xi[rows] = 0.0
+        self.lam[rows] = 0.0
+        led = self.ledger  # fields are tensors (views of one buffer in K1PHPlantNative): zero their rows in place
+        for f in dataclasses.fields(Ledger):
+            getattr(led, f.name)[rows] = 0.0
 
     def _sole_points(self, kin: Kinematics) -> torch.Tensor:
         m = self.model

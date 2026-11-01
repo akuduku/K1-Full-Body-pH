@@ -82,7 +82,7 @@ class K1PHPlantNative(K1PHPlant):
     # ------------------------------------------------------------- state
     def reset(self, *args, **kwargs) -> None:
         super().reset(*args, **kwargs)
-        self.reset_command_path()
+        self.reset_command_path(kwargs.get("env_ids"))
 
     def reset_command_path(self, env_ids=None) -> None:
         """Firmware state and delay line start at the current pose; the delays are drawn again."""
@@ -200,10 +200,12 @@ class K1PHPlantNative(K1PHPlant):
         return self._gains[key]
 
     def policy_step(self, targets: torch.Tensor, substeps: int | None = None, kp: torch.Tensor | None = None,
-                    kd: torch.Tensor | None = None, gain_scale: float | None = None) -> StepInfo:
+                    kd: torch.Tensor | None = None, gain_scale: float | None = None,
+                    push_dv: torch.Tensor | None = None) -> StepInfo:
         """One policy step on the robot's command path: `targets` (B,22) joint angles go through the firmware
         filter, the delay line and the motor driver for `substeps` plant steps (default policy_dt / h).
-        kp, kd (B,22) override the gains (domain randomisation).  Returns the StepInfo of the last plant step."""
+        kp, kd (B,22) override the gains (domain randomisation); push_dv (B,3) changes the trunk's world velocity
+        at the start of the step (a shove; rows of zeros: no push).  Returns the StepInfo of the last plant step."""
         cfg = self.firmware
         if substeps is None:
             substeps = max(1, round(cfg.policy_dt / self.h))
@@ -220,6 +222,8 @@ class K1PHPlantNative(K1PHPlant):
         self._native.run(self._model_block(), self.q, self.p, self.xi, self.lam, self._led,
                          target=self._rows(targets), last_target=self.last_target, ring=self.ring,
                          ring_idx=self.ring_idx, lag=self.lag, kp=self._rows(kp), kd=self._rows(kd),
+                         push=None if push_dv is None else torch.as_tensor(push_dv, dtype=self.dtype, device=self.device)
+                         .expand(self.B, 3).contiguous(),
                          nsub=int(substeps), **out)
         self.time += substeps * self.h
         return self._info(out)

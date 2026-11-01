@@ -160,7 +160,7 @@ void run_t(const torch::Tensor& model, const torch::Tensor& q, const torch::Tens
            const c10::optional<torch::Tensor>& jtau, const c10::optional<torch::Tensor>& target,
            const c10::optional<torch::Tensor>& last_target, const c10::optional<torch::Tensor>& ring,
            const c10::optional<torch::Tensor>& ring_idx, const c10::optional<torch::Tensor>& lag,
-           const c10::optional<torch::Tensor>& kp, const c10::optional<torch::Tensor>& kd, int64_t nsub,
+           const c10::optional<torch::Tensor>& push, const c10::optional<torch::Tensor>& kp, const c10::optional<torch::Tensor>& kd, int64_t nsub,
            const c10::optional<torch::Tensor>& out_nu, const c10::optional<torch::Tensor>& out_i,
            const c10::optional<torch::Tensor>& out_tau, const c10::optional<torch::Tensor>& out_v,
            const c10::optional<torch::Tensor>& out_fc, const c10::optional<torch::Tensor>& out_active,
@@ -196,6 +196,7 @@ void run_t(const torch::Tensor& model, const torch::Tensor& q, const torch::Tens
         b.ring = rows<T>(ring, q, B, b.ring_len * ph::NJ, "ring", true);
         b.ring_idx = rows_i32(ring_idx, q, B, "ring_idx");
         b.lag = rows_i32(lag, q, B, "lag");
+        b.push = rows<T>(push, q, B, 3, "push");
         b.kp = rows<T>(kp, q, B, ph::NJ, "kp", true);
         b.kd = rows<T>(kd, q, B, ph::NJ, "kd", true);
     }
@@ -229,7 +230,7 @@ void run(const torch::Tensor& model, const torch::Tensor& q, const torch::Tensor
          const c10::optional<torch::Tensor>& jtau, const c10::optional<torch::Tensor>& target,
          const c10::optional<torch::Tensor>& last_target, const c10::optional<torch::Tensor>& ring,
          const c10::optional<torch::Tensor>& ring_idx, const c10::optional<torch::Tensor>& lag,
-         const c10::optional<torch::Tensor>& kp, const c10::optional<torch::Tensor>& kd, int64_t nsub,
+         const c10::optional<torch::Tensor>& push, const c10::optional<torch::Tensor>& kp, const c10::optional<torch::Tensor>& kd, int64_t nsub,
          const c10::optional<torch::Tensor>& out_nu, const c10::optional<torch::Tensor>& out_i,
          const c10::optional<torch::Tensor>& out_tau, const c10::optional<torch::Tensor>& out_v,
          const c10::optional<torch::Tensor>& out_fc, const c10::optional<torch::Tensor>& out_active,
@@ -237,10 +238,10 @@ void run(const torch::Tensor& model, const torch::Tensor& q, const torch::Tensor
          const c10::optional<torch::Tensor>& out_acc, const c10::optional<torch::Tensor>& out_target) {
     TORCH_CHECK(nsub >= 1, "nsub must be >= 1");
     if (q.scalar_type() == torch::kFloat64) {
-        run_t<double>(model, q, p, xi, lam, ledger, volts, jtau, target, last_target, ring, ring_idx, lag, kp, kd, nsub,
+        run_t<double>(model, q, p, xi, lam, ledger, volts, jtau, target, last_target, ring, ring_idx, lag, push, kp, kd, nsub,
                       out_nu, out_i, out_tau, out_v, out_fc, out_active, out_slip, out_gyro, out_acc, out_target);
     } else if (q.scalar_type() == torch::kFloat32) {
-        run_t<float>(model, q, p, xi, lam, ledger, volts, jtau, target, last_target, ring, ring_idx, lag, kp, kd, nsub,
+        run_t<float>(model, q, p, xi, lam, ledger, volts, jtau, target, last_target, ring, ring_idx, lag, push, kp, kd, nsub,
                      out_nu, out_i, out_tau, out_v, out_fc, out_active, out_slip, out_gyro, out_acc, out_target);
     } else {
         TORCH_CHECK(false, "state must be float32 or float64");
@@ -258,6 +259,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
             py::arg("p"), py::arg("xi"), py::arg("lam"), py::arg("ledger"), py::arg("volts") = py::none(),
             py::arg("joint_torque") = py::none(), py::arg("target") = py::none(), py::arg("last_target") = py::none(),
             py::arg("ring") = py::none(), py::arg("ring_idx") = py::none(), py::arg("lag") = py::none(),
+            py::arg("push") = py::none(),
             py::arg("kp") = py::none(), py::arg("kd") = py::none(), py::arg("nsub") = 1,
             py::arg("out_nu") = py::none(), py::arg("out_i") = py::none(), py::arg("out_tau") = py::none(),
             py::arg("out_v") = py::none(), py::arg("out_fc") = py::none(), py::arg("out_active") = py::none(),

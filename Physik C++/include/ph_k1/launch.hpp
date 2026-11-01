@@ -31,6 +31,7 @@ struct BatchT {
     int* ring_idx = nullptr;           // B  write position
     const int* lag = nullptr;          // B  delay in plant steps, 0 .. ring_len-1
     int ring_len = 0;
+    const T* push = nullptr;           // B x 3  world-frame trunk velocity change at the policy step (or null)
     const T* kp = nullptr;
     const T* kd = nullptr;
     // outputs
@@ -79,8 +80,21 @@ PH_HD void run_robot(const ModelData<T>& m, const BatchT<T>& b, int r, Work<T>& 
         for (int s = 0; s < b.nsub; ++s) plant_step(m, io, w);
         return;
     }
-    // the firmware filter once per policy step, on the measured joint state
+    // the state at the policy step (and an optional push: a change of the trunk's world velocity)
     kinematics_and_velocity(m, io.q, io.p, w);
+    if (b.push && !m.fixed_base) {
+        const T* dv = b.push + r * 3;
+        if (dv[0] != T(0) || dv[1] != T(0) || dv[2] != T(0)) {
+            const T* R0 = w.f.R[0];  // v_B = R^T r_dot: the body-frame part of the world change
+            for (int i = 0; i < 3; ++i) w.nu[3 + i] += R0[0 * 3 + i] * dv[0] + R0[1 * 3 + i] * dv[1] + R0[2 * 3 + i] * dv[2];
+            for (int a = 0; a < NV; ++a) {
+                T s = 0;
+                for (int c = 0; c < NV; ++c) s += w.M[a * NV + c] * w.nu[c];
+                io.p[a] = s;
+            }
+        }
+    }
+    // the firmware filter once per policy step, on the measured joint state
     T sent[NJ];
     safety_filter(m, b.policy_target + r * NJ, b.last_target + r * NJ, io.q + 7, w.nu + NB, io.kp, io.kd, sent);
     // every plant step: into the delay line; the driver holds the target sent `lag` steps ago

@@ -309,3 +309,48 @@ def test_float32_servo_hold():
     assert tilt.max() < 1.0, f"tilt {tilt.max():.2f} deg"
     assert (q[:, 2] - 0.515).abs().max() < 0.01
     assert residual.abs().max() < 0.05, f"ledger residual {residual.abs().max():.3f} J"
+
+
+def test_reset_of_some_robots_leaves_the_others(model64):
+    """RL resets fallen robots only: the other rows (plant state, ledger, command path) stay bit-identical."""
+    torch.manual_seed(7)
+    nat = K1PHPlantNative(model=model64, batch=4, firmware=FirmwareConfig(delay_ms=(5.0, 30.0)))
+    nat.reset()
+    target = nat.theta + 0.2 * torch.randn(4, NJ, dtype=torch.float64, device=DEVICE)
+    for it in range(5):
+        nat.policy_step(target)
+    keep = torch.tensor([0, 2], device=DEVICE)
+    before = {n: getattr(nat, n)[keep].clone() for n in ("q", "p", "xi", "lam", "last_target", "ring", "ring_idx", "lag")}
+    led_before = nat._led[keep].clone()
+    pose = model64.pose_vector() + 0.01
+    nat.reset(pose=pose, env_ids=torch.tensor([1, 3], device=DEVICE))
+    for n, v in before.items():
+        assert torch.equal(getattr(nat, n)[keep], v), f"{n} of an untouched robot changed"
+    assert torch.equal(nat._led[keep], led_before)
+    reset_rows = torch.tensor([1, 3], device=DEVICE)
+    assert (nat.theta[reset_rows] - pose).abs().max() == 0
+    assert nat.p[reset_rows].abs().max() == 0 and nat._led[reset_rows].abs().max() == 0
+    assert (nat.last_target[reset_rows] - pose).abs().max() == 0 and (nat.ring_idx[reset_rows] == 0).all()
+    # the reset robots stand on the floor again: lowest sole point at z = 0
+    pc = nat._sole_points(nat.kinematics())
+    assert pc[reset_rows, :, 2].min(-1).values.abs().max() < 1e-12
+
+
+def test_push_matches_reference(model64):
+    """A shove (world-frame trunk velocity change at the policy step) in C++ == firmware.K1Firmware."""
+    torch.manual_seed(8)
+    cfg = FirmwareConfig(delay_ms=(0.0, 0.0))
+    py, nat, ref = _command_pair(model64, cfg, 3, [0, 4, 9])
+    target = py.theta.clone()
+    dv = torch.tensor([[0.3, 0.0, 0.0], [0.0, -0.25, 0.05], [0.0, 0.0, 0.0]], dtype=torch.float64, device=DEVICE)
+    a, b = ref.policy_step(target, push_dv=dv), nat.policy_step(target, push_dv=dv)
+    same_state(py, nat, 1e-9, "push")
+    _same_command_state(ref, nat, a, b, 1e-9, "push")
+    for it in range(5):
+        a, b = ref.policy_step(target), nat.policy_step(target)
+    same_state(py, nat, 1e-8, "after the push")
+    # the pushed robots move in the push direction, the third one does not
+    v = b.extra["nu"][:, 3:6]
+    R = nat.kinematics().R[:, 0]
+    v_world = (R @ v[..., None]).squeeze(-1)
+    assert v_world[0, 0] > 0.05 and v_world[1, 1] < -0.05 and v_world[2].abs().max() < 0.05

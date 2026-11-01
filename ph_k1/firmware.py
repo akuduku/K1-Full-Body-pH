@@ -208,7 +208,7 @@ class K1Firmware:
         self.ring_idx[env_ids] = 0
         self.lag[env_ids] = draw_lags(self.cfg, len(env_ids), pl.h, pl.device).long()
 
-    def policy_step(self, target, substeps: int | None = None, kp=None, kd=None):
+    def policy_step(self, target, substeps: int | None = None, kp=None, kd=None, push_dv=None):
         pl, cfg = self.plant, self.cfg
         if substeps is None:
             substeps = max(1, round(cfg.policy_dt / pl.h))
@@ -224,6 +224,12 @@ class K1Firmware:
             redraw = torch.rand(B, device=pl.device) >= cfg.delay_hold_prob
             if bool(redraw.any()):
                 self.lag[redraw] = draw_lags(cfg, int(redraw.sum()), pl.h, pl.device).long()
+        if push_dv is not None and not pl.fixed_base:  # a shove: change the trunk's world velocity, keep q
+            kin = pl.kinematics()
+            nu = pl.velocity(kin)
+            dv = torch.as_tensor(push_dv, dtype=pl.dtype, device=pl.device).expand(B, 3)
+            nu[:, 3:6] += (kin.R[:, 0].transpose(1, 2) @ dv[..., None]).squeeze(-1)
+            pl.p = (kin.M @ nu[..., None]).squeeze(-1)
         qd = pl.velocity()[:, NB:]
         t = safety_filter(pl.model, cfg, target, self.last_target, pl.theta, qd, kp, kd)
         self.last_target = t

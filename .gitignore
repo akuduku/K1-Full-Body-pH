@@ -8,3 +8,6 @@ outputs/
 Physik C++/build/
 Physik C++/*.so
 *.egg-info/
+# training runs (stand/train.py)
+logs/
+wandb/
