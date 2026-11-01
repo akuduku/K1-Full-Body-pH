@@ -403,10 +403,19 @@ def test_gain_line_matches_reference(model64):
         kp = kp0 * torch.exp(0.8 * torch.randn(3, NJ, dtype=torch.float64, device=DEVICE))
         kd = kd0 * torch.exp(0.8 * torch.randn(3, NJ, dtype=torch.float64, device=DEVICE))
         a, b = ref.policy_step(target, kp=kp, kd=kd), nat.policy_step(target, kp=kp, kd=kd)
-        # gains x0.1..x10 switching every step make the motors stiff: on a GPU (other summation order) torques of
-        # tens of N m differ by ~1e-7 (1e-9 relative); on the CPU it agrees to round-off
-        same_state(py, nat, 1e-6, f"gain line, policy step {it}")
-        _same_command_state(ref, nat, a, b, 1e-6, "gain line")
+        # gains x0.1..x10 switching every step: a deliberately stiff, chaotic case.  On the CPU C++ == Python to
+        # ~1e-13; a GPU (fused multiply-adds, other summation order) drifts to ~3e-8 RELATIVE over these steps
+        # (Kaggle/Colab T4), so this test compares relative to each quantity's size
+        pairs = [(n, getattr(py, n), getattr(nat, n)) for n in ("q", "p", "xi", "lam")]
+        pairs += [(f"ledger.{f}", getattr(py.ledger, f), getattr(nat.ledger, f))
+                  for f in ("supplied", "mech_input", "copper", "gearbox", "stops", "contact")]
+        pairs += [("last_target", ref.last_target, nat.last_target), ("held target", a.extra["target"], b.extra["target"]),
+                  ("gyro", a.extra["gyro"], b.extra["gyro"]), ("acc", a.extra["acc"], b.extra["acc"]),
+                  ("torque", a.torque, b.torque)]
+        for name, x, y in pairs:
+            err = (x - y).abs().max().item()
+            scale = 1.0 + x.abs().max().item()
+            assert err <= 1e-6 * scale, f"gain line, policy step {it}, {name}: {err:.3e} (size {scale:.3g})"
 
 
 @pytest.mark.parametrize("delay_gains", [True, False])
