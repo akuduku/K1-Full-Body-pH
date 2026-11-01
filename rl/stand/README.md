@@ -56,6 +56,32 @@ W&B: `karl-jahnel-universit-t-leipzig` / **Akos pH Stand**, one run per training
 terminations, energy, a video every 500 iterations, every checkpoint with its `deploy_<it>.bin`, and at the end
 the artifact `k1-stand-ph` (`deploy.bin` + checkpoint).
 
+## Play with it: push it with the mouse, watch the energy tanks
+
+```bash
+python rl/stand/play.py                       # the newest deploy_*.bin of outputs/kaggle/stand-ph-v1
+python rl/stand/play.py --policy deploy_2999.bin --delay-ms 30
+python rl/stand/play.py --no-viewer --seconds 12 --test-force 35    # headless: scripted pulls, plot to a PNG
+```
+
+The **pH plant** moves the robot, with the stand agent exactly as in training. MuJoCo only draws it and catches
+the mouse.
+
+- **Push:** in the MuJoCo window, **double-click** a body, then hold **Ctrl + right mouse button** and drag.
+  A spring pulls that point toward the mouse, using MuJoCo's rule: stiffness × the mass hanging on that body.
+  It enters the plant as the generalised force `Jᵀf` (`gen_force` port), and its work is booked in the ledger.
+- **Push strength:** the slider under the plot scales the force from ×0 to ×5.
+- **Reset:** **R** puts the robot back on its feet. It is also reset 2 s after a fall.
+- **The plot:** the tanks of H over the last 10 s (kinetic, gravity relative to the start, coil), plus the push
+  force, push work, battery energy and losses.
+
+At the end it prints the energy balance `H(t) − H(0) = battery + push work − losses`, which closes to about 1 %.
+
+Policy `deploy_2999.bin` (end of stand-ph-v1), headless with 20 ms delay:
+- without pushes it stands on 0.7 W (8 J in 12 s);
+- it catches pulls of 20–35 N for 150 ms on the trunk (about 0.15–0.27 m/s, the training's range);
+- a 60 N pull (about 0.46 m/s) knocks it over.
+
 ## Tests
 
 ```bash

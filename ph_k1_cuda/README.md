@@ -95,6 +95,8 @@ plant = K1PHPlantNative(..., firmware=FirmwareConfig(gains="standup", slew=False
 info = plant.policy_step(targets, kp=kp, kd=kd)
 # an external world force on the trunk origin during the step (a training assist); its work -> ledger.mech_input
 info = plant.policy_step(targets, trunk_force=f)      # f (B,3) [N]; also plant.step(volts, trunk_force=f)
+# any external push as a generalised force (B,28), e.g. J^T f of a point on a body (rl/stand/play.py, the mouse)
+info = plant.policy_step(targets, gen_force=F)        # its work -> ledger.mech_input as well
 ```
 
 `K1PHPlantNative` is a subclass of `K1PHPlant`: `reset`, `kinematics`, `velocity`, `energy`, `ledger`,
@@ -103,7 +105,7 @@ info = plant.policy_step(targets, trunk_force=f)      # f (B,3) [N]; also plant.
 ## Tests and results
 
 ```bash
-python -m pytest ph_k1_cuda/tests -q                       # 21 tests: C++ vs Python, float64, CPU
+python -m pytest ph_k1_cuda/tests -q                       # 23 tests: C++ vs Python, float64, CPU
 PH_TEST_DEVICE=cuda python -m pytest ph_k1_cuda/tests -q   # the same on a GPU
 python validation/checks.py --impl native                               # 9/9 PASS
 python benchmarks/benchmark_ph.py --impl native              # speed
@@ -122,6 +124,8 @@ python benchmarks/benchmark_ph.py --impl native              # speed
   step does exactly what an undelayed one did d ms earlier (and without the gain line it does not)
 - the trunk force == the Python reference; 250 N lifts the robot off, its work F·Δz goes into mech_input and
   the ledger balances
+- a generalised force (gen_force) == the Python reference; a push on a hand point as J^T f: its work equals
+  sum f·v h exactly and the ledger balances
 
 Laptop CPU (6 threads), float32, policy steps per second (50 Hz policy = 20 plant steps, with the command path):
 

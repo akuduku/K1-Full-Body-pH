@@ -220,13 +220,15 @@ class K1PHPlant:
 
     # ------------------------------------------------------------------ step
     def step(self, volts: torch.Tensor | None = None, joint_torque: torch.Tensor | None = None,
-             trunk_force: torch.Tensor | None = None) -> StepInfo:
+             trunk_force: torch.Tensor | None = None, gen_force: torch.Tensor | None = None) -> StepInfo:
         """Advance h seconds.  volts (B,22) is the ONLY physical input of the robot.
 
         joint_torque is a test port for validation with motors_connected=False
         (torque straight onto the hinges, like MuJoCo's qfrc_applied).
         trunk_force (B,3) is an external world-frame force on the trunk origin (a training assist, a hand);
         its work enters ledger.mech_input like the joint_torque port's.
+        gen_force (B,28) is an external generalised force on (omega_B, v_B, theta_dot), e.g. J^T f of a push on
+        any body point; its work also enters ledger.mech_input.
         """
         m, h, B = self.model, self.h, self.B
         mot, c, lim = self.motors, self.contact, self.limits
@@ -253,6 +255,10 @@ class K1PHPlant:
             f_w = torch.as_tensor(trunk_force, dtype=self.dtype, device=self.device).expand(B, 3)
             f_body = (kin.R[:, 0].transpose(1, 2) @ f_w[..., None]).squeeze(-1)
             F[:, 3:6] += f_body
+        fgen = None
+        if gen_force is not None:
+            fgen = torch.as_tensor(gen_force, dtype=self.dtype, device=self.device).expand(B, NV)
+            F += fgen
 
         # implicit diagonal on the hinge rows: gearbox + end-stop
         diag = mot.damping.expand(B, NJ).clone()
@@ -363,6 +369,8 @@ class K1PHPlant:
             led.mech_input += h * (joint_torque * thd1).sum(-1)
         if f_body is not None:
             led.mech_input += h * (f_body * nu1[:, 3:6]).sum(-1)
+        if fgen is not None:
+            led.mech_input += h * (fgen * nu1).sum(-1)
 
         # ---- configuration update ------------------------------------------
         q = self.q.clone()

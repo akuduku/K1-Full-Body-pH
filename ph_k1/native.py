@@ -197,14 +197,19 @@ class K1PHPlantNative(K1PHPlant):
             return None
         return torch.as_tensor(trunk_force, dtype=self.dtype, device=self.device).expand(self.B, 3).contiguous()
 
+    def _gen(self, gen_force):
+        if gen_force is None:
+            return None
+        return torch.as_tensor(gen_force, dtype=self.dtype, device=self.device).expand(self.B, NV).contiguous()
+
     def step(self, volts: torch.Tensor | None = None, joint_torque: torch.Tensor | None = None,
-             trunk_force: torch.Tensor | None = None) -> StepInfo:
+             trunk_force: torch.Tensor | None = None, gen_force: torch.Tensor | None = None) -> StepInfo:
         """The plant alone: advance h seconds with these coil volts (same as K1PHPlant.step)."""
         self._prepare()
         out = self._outputs(policy=False)
         self._native.run(self._model_block(), self.q, self.p, self.xi, self.lam, self._led,
                          volts=self._rows(volts), joint_torque=self._rows(joint_torque),
-                         trunk_force=self._force(trunk_force), nsub=1, **out)
+                         trunk_force=self._force(trunk_force), gen_force=self._gen(gen_force), nsub=1, **out)
         self.time += self.h
         return self._info(out)
 
@@ -221,13 +226,15 @@ class K1PHPlantNative(K1PHPlant):
 
     def policy_step(self, targets: torch.Tensor, substeps: int | None = None, kp: torch.Tensor | None = None,
                     kd: torch.Tensor | None = None, gain_scale: float | None = None,
-                    push_dv: torch.Tensor | None = None, trunk_force: torch.Tensor | None = None) -> StepInfo:
+                    push_dv: torch.Tensor | None = None, trunk_force: torch.Tensor | None = None,
+                    gen_force: torch.Tensor | None = None) -> StepInfo:
         """One policy step on the robot's command path: `targets` (B,22) joint angles go through the firmware
         filter, the delay line and the motor driver for `substeps` plant steps (default policy_dt / h).
         kp, kd (B,22) override the gains (domain randomisation, or a policy's own gains; with
         firmware.delay_gains they go through the delay line with the target); push_dv (B,3) changes the trunk's
         world velocity at the start of the step (a shove; rows of zeros: no push); trunk_force (B,3) is a world
-        force on the trunk during the whole step (an assist; its work goes into ledger.mech_input).
+        force on the trunk during the whole step (an assist; its work goes into ledger.mech_input); gen_force
+        (B,28) a generalised force during the whole step (J^T f of a push on any body point; work -> mech_input).
         Returns the StepInfo of the last plant step."""
         cfg = self.firmware
         if substeps is None:
@@ -248,6 +255,7 @@ class K1PHPlantNative(K1PHPlant):
                          push=None if push_dv is None else torch.as_tensor(push_dv, dtype=self.dtype, device=self.device)
                          .expand(self.B, 3).contiguous(),
                          ring_kp=self.ring_kp, ring_kd=self.ring_kd, trunk_force=self._force(trunk_force),
+                         gen_force=self._gen(gen_force),
                          nsub=int(substeps), **out)
         self.time += substeps * self.h
         return self._info(out)

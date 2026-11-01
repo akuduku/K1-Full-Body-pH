@@ -153,6 +153,8 @@ cd ph_k1_cuda && python setup.py build_ext --inplace && cd ..   # the C++ plant 
 python -m pytest ph_k1_cuda/tests rl/stand/tests rl/getup/tests -q   # C++ == Python reference, the tasks
 TASK=stand kaggle/run.sh ITERATIONS=3000 RUN_NAME=stand-ph-v1   # train the stand policy on a Kaggle T4
 colab-train launch --browser colab/k1-getup.yaml               # train the get-up policy on a Colab T4
+python rl/stand/play.py                                         # the trained stand policy: push it with the mouse,
+                                                                # live energy tanks (pH plant, MuJoCo draws)
 ```
 
 Plots (energy tanks, ledger, trunk height and tilt) and CSVs are written to

@@ -430,3 +430,46 @@ def test_gains_are_delayed_with_the_target(model64, delay_gains):
         assert err < 1e-12, f"delayed robot differs from the shifted undelayed one by {err:.2e}"
     else:
         assert err > 1e-6, "without the gain line the delayed robot should feel the new gains too early"
+
+
+def test_gen_force_matches_reference(model64):
+    """A generalised force (e.g. J^T f of a mouse push) in C++ == K1PHPlant, policy-step mode, work in the ledger."""
+    torch.manual_seed(12)
+    cfg = FirmwareConfig(delay_ms=(0.0, 0.0))
+    py, nat, ref = _command_pair(model64, cfg, 2, [0, 5])
+    F = 5.0 * torch.randn(2, NB + NJ, dtype=torch.float64, device=DEVICE)
+    target = py.theta.clone()
+    for it in range(4):
+        a, b = ref.policy_step(target, gen_force=F), nat.policy_step(target, gen_force=F)
+    same_state(py, nat, 1e-8, "gen_force")
+    _same_command_state(ref, nat, a, b, 1e-8, "gen_force")
+    assert py.ledger.mech_input.abs().min() > 1e-4
+
+
+def test_push_on_a_hand_is_work_in_the_ledger(model64):
+    """A world force on a hand point as J^T f: the robot moves, the ledger balances, the work = sum f . v_point h."""
+    from ph_k1.dynamics import point_jacobian
+
+    nat = K1PHPlantNative(model=model64, batch=1, firmware=FirmwareConfig(delay_ms=(0.0, 0.0)))
+    nat.reset()
+    hand = model64.body_names.index("left_hand_link")
+    body = torch.tensor([hand], device=DEVICE)
+    f = torch.tensor([0.0, 25.0, 10.0], dtype=torch.float64, device=DEVICE)
+    H0 = nat.energy()["total"].clone()
+    target = nat.theta.clone()
+    work = 0.0
+    for it in range(200):  # 200 ms, one plant step per call so the force follows the point
+        kin = nat.kinematics()
+        x = kin.pos[:, hand] + (kin.R[:, hand] @ torch.zeros(3, dtype=torch.float64, device=DEVICE))
+        J = point_jacobian(kin, body, x[:, None])[:, 0]           # (1, 3, 28)
+        F = (J.transpose(1, 2) @ f[:, None]).squeeze(-1)          # (1, 28)
+        info = nat.policy_step(target, substeps=1, gen_force=F, gain_scale=3.0)
+        v = (J @ info.extra["nu"][..., None]).squeeze(-1)[0]      # point velocity after the step
+        work += float(f @ v) * nat.h
+    led = nat.ledger
+    assert abs(led.mech_input.item() - work) < 1e-9 + 1e-6 * abs(work), "mech_input != sum f . v h"
+    assert work > 0.01, f"the push should do work, did {work:.4f} J"
+    residual = (nat.energy()["total"] - H0) - (led.supplied + led.mech_input - led.dissipated)
+    flow = (led.supplied.abs() + led.mech_input.abs() + led.dissipated).item()
+    # first-order integrator: the balance closes to a few % of the energy that flowed while the body moves
+    assert residual.abs().max() < 0.03 * flow + 0.01, f"ledger residual {residual.item():.3f} J of {flow:.2f} J"

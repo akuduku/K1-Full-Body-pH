@@ -141,3 +141,26 @@ def test_rewards_are_finite_and_alive_dominates_while_standing(env):
     _, rew, _, _ = env.step(torch.zeros(8, C.NUM_ACTIONS, device=env.device))
     assert torch.isfinite(rew).all()
     assert (rew > 0).all(), "a clean standing step must have positive reward (else falling on purpose pays)"
+
+
+def test_mouse_force_is_a_spring_on_the_pulled_point():
+    """rl/stand/play.py: no force without an active pull; the generalised force is J^T f of the pulled point; the
+    slider scales it; a pull above the point at rest pulls up."""
+    from ph_k1.native import K1PHPlantNative
+    from rl.stand.play import mouse_force
+
+    plant = K1PHPlantNative(model=load_k1(), batch=1)
+    plant.reset()
+    kin = plant.kinematics()
+    nu = torch.zeros(1, 28, dtype=torch.float64)
+    hand = plant.model.body_names.index("left_hand_link")
+    x = kin.pos[0, hand].numpy()
+    f0, g0, _ = mouse_force(0, hand, x + [0, 0, 0.1], [0, 0, 0], kin, 2.0, 100.0, 1.0, nu)
+    assert g0 is None and np.all(f0 == 0)
+    f1, g1, p1 = mouse_force(1, hand, x + [0, 0, 0.1], [0, 0, 0], kin, 2.0, 100.0, 1.0, nu)
+    assert np.allclose(f1, [0, 0, 20.0]) and np.allclose(p1, x)
+    f2, g2, _ = mouse_force(1, hand, x + [0, 0, 0.1], [0, 0, 0], kin, 2.0, 100.0, 2.5, nu)
+    assert np.allclose(f2, 2.5 * f1) and torch.allclose(g2, 2.5 * g1)
+    # J^T f: the trunk's linear row (body frame) carries the force, its vertical part equals 20 N at rest pose
+    R0 = kin.R[0, 0]
+    assert torch.allclose(R0 @ g1[0, 3:6], torch.tensor([0, 0, 20.0], dtype=torch.float64), atol=1e-9)

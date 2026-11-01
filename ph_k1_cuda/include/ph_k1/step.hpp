@@ -25,6 +25,7 @@ struct StepIO {
     const T* volts;  // NJ, null = 0 V (ignored while the motor driver runs)
     const T* jtau;   // NJ test torque port, null = none
     const T* fext;   // 3 world-frame force on the trunk origin (e.g. a get-up assist), null = none
+    const T* fgen;   // NV generalised force (e.g. J^T f of a push on any body point), null = none
     // motor driver; active when target != null (set per plant step by the command path in launch.hpp)
     const T* target;    // NJ the target the driver holds this step (already filtered and delayed)
     const T* kp;        // NJ
@@ -231,6 +232,8 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
             w.F[3 + i] += f_body[i];
         }
     }
+    if (io.fgen)
+        for (int d = 0; d < NV; ++d) w.F[d] += io.fgen[d];
 
     // hinge diagonal: gearbox damping + end stops
     for (int k = 0; k < NJ; ++k) {
@@ -351,6 +354,8 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
     }
     if (use_fext)
         for (int i = 0; i < 3; ++i) mech += f_body[i] * w.nu1[3 + i];
+    if (io.fgen)
+        for (int d = 0; d < NV; ++d) mech += io.fgen[d] * w.nu1[d];
     io.ledger[0] += h * supplied;
     io.ledger[1] += h * mech;
     io.ledger[2] += h * copper;

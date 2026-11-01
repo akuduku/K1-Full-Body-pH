@@ -40,6 +40,8 @@ struct BatchT {
     T* ring_kd = nullptr;
     // both modes: B x 3 world-frame force on the trunk origin during every plant step (or null)
     const T* force = nullptr;
+    // both modes: B x NV generalised force during every plant step (or null)
+    const T* gen_force = nullptr;
     // outputs
     T* out_nu = nullptr;
     T* out_i = nullptr;
@@ -67,6 +69,7 @@ PH_HD StepIO<T> make_io(const BatchT<T>& b, int r, int nc) {
     io.kp = b.kp ? b.kp + r * NJ : nullptr;
     io.kd = b.kd ? b.kd + r * NJ : nullptr;
     io.fext = b.force ? b.force + r * 3 : nullptr;
+    io.fgen = b.gen_force ? b.gen_force + r * NV : nullptr;
     io.out_nu = b.out_nu ? b.out_nu + r * NV : nullptr;
     io.out_i = b.out_i ? b.out_i + r * NJ : nullptr;
     io.out_tau = b.out_tau ? b.out_tau + r * NJ : nullptr;

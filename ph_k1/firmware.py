@@ -220,7 +220,8 @@ class K1Firmware:
             self.ring_kp[env_ids] = kp0
             self.ring_kd[env_ids] = kd0
 
-    def policy_step(self, target, substeps: int | None = None, kp=None, kd=None, push_dv=None, trunk_force=None):
+    def policy_step(self, target, substeps: int | None = None, kp=None, kd=None, push_dv=None, trunk_force=None,
+                    gen_force=None):
         pl, cfg = self.plant, self.cfg
         if substeps is None:
             substeps = max(1, round(cfg.policy_dt / pl.h))
@@ -260,7 +261,7 @@ class K1Firmware:
             kin = pl.kinematics()
             nu = pl.velocity(kin)
             volts = motor_volts(pl, sent, kp_held, kd_held, qd=nu[:, NB:])
-            info = pl.step(volts, trunk_force=trunk_force)
+            info = pl.step(volts, trunk_force=trunk_force, gen_force=gen_force)
             info.extra["gyro"], info.extra["acc"] = imu_step(pl, kin, nu)
             info.extra["target"] = sent
             self.ring_idx = (self.ring_idx + 1) % D
