@@ -83,8 +83,10 @@ def main():
           f"logs -> {Path(args.log_root) / args.run_name}", flush=True)
 
     def video_env():
+        # on the CPU: the 1-robot video env on the GPU crashed the process (SIGSEGV) at the first video, with the
+        # tank on, in getup-ph-v1 (Colab) and getup-mb-v1 (Kaggle); on the CPU it runs (and leaves the GPU alone)
         return GetUpEnv(GetUpConfig(**{**cfg.__dict__, "num_envs": 1, "seed": cfg.seed + 1, "library_size": 32,
-                                       "assist_force": 0.0, "push_dv": 0.0, "obs_noise": {}}))
+                                       "assist_force": 0.0, "push_dv": 0.0, "obs_noise": {}, "device": "cpu"}))
 
     kinds = cfg.lying_kinds
 

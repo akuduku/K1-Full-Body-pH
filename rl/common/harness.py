@@ -137,7 +137,8 @@ class VideoMaker:
     rsl-rl logger uploads every new MP4 in the run folder to W&B at that iteration).
 
     make_env() builds the 1-robot env (once, lazily); prepare(env, it) puts it into the start state of the video
-    (default: reset robot 0)."""
+    (default: reset robot 0).  The env may live on another device than the policy (e.g. the CPU while training on
+    the GPU): the observations are moved to the policy's device, the env takes the actions to its own."""
 
     def __init__(self, make_env: Callable, seconds: float, policy_dt: float, out_dir: Path, prefix: str,
                  prepare: Callable | None = None):
@@ -149,6 +150,7 @@ class VideoMaker:
         self.prepare = prepare or (lambda env, it: env._reset_idx(torch.arange(1, device=env.device)))
         self.env = None
         self.broken = False
+        self.policy_device = None  # set by train(): where the policy runs
 
     def __call__(self, policy, it: int) -> Path | None:
         if self.broken:
@@ -164,9 +166,10 @@ class VideoMaker:
                 env = self.env
                 self.prepare(env, it)
                 rec = VideoRecorder(env.plant, fps=self.fps)
+                to_policy = (lambda o: o) if self.policy_device is None else (lambda o: o.to(self.policy_device))
                 obs = env.get_observations()
                 for _ in range(self.steps):
-                    obs, _, _, _ = env.step(policy(obs))
+                    obs, _, _, _ = env.step(policy(to_policy(obs)))
                     rec.capture()
             path = rec.save(self.out_dir / f"{self.prefix}_{it:05d}.mp4")
             rec.close()
@@ -230,6 +233,7 @@ def train(env, args, *, tag: str, hidden_dims, export: Callable | None = None, v
         if video is None:
             return
         policy = runner.get_inference_policy(device=str(env.device))
+        video.policy_device = env.device
         path = video(policy, it)
         runner.alg.train_mode()
         if path:
