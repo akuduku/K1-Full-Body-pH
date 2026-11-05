@@ -56,7 +56,19 @@ def main():
     ap.add_argument("--push", type=float, default=0.0, help="sideways trunk velocity change every 4 s once standing [m/s]")
     ap.add_argument("--viewer", action="store_true")
     ap.add_argument("--record", default=None, help="MP4 path (offscreen rendering)")
+    ap.add_argument("--gain-scale", type=float, default=None,
+                    help="the gain curriculum the policy was trained to (default: from a model_<it>.pt, else 1)")
     args = ap.parse_args()
+    gain_scale = args.gain_scale
+    if gain_scale is None:
+        gain_scale = 1.0
+        if args.policy.endswith(".pt"):
+            try:
+                gain_scale = float(torch.load(args.policy, map_location="cpu", weights_only=False)["infos"]
+                                   ["curriculum"].get("gain_scale", 1.0))
+            except Exception:  # noqa: BLE001  (an older checkpoint: the full gain range)
+                pass
+    print(f"gain scale {gain_scale:g} (0: the agent's fixed gains, 1: x2^+-{C.GAIN_RANGE:g})")
 
     model = load_k1()  # float64 CPU: tables, ranges, motor constants
     mot = build_motors(model)
@@ -161,7 +173,7 @@ def main():
         obs = con.observe(gyro, g, theta, qd, last_action, tank.fraction())
         action = torch.as_tensor(policy(obs.numpy()))
         last_action = action
-        target, kp, kd = con.decode(action)
+        target, kp, kd = con.decode(action, gain_scale)
         filt = lambda tt, kk, dd: safety_filter(model, cfg, tt, last_target, theta, qd, kk, dd)  # noqa: E731
         target, kp, kd, info = tank.step(theta, qd, qd_prev, cfg.policy_dt, target, kp, kd, filt)
         injected += float(info["injected"].clamp_min(0).sum())

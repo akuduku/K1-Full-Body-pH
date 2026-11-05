@@ -201,3 +201,39 @@ def test_export_round_trip(tmp_path):
     with torch.no_grad():
         want = actor(obs).double().numpy()
     assert np.abs(bin_policy(mats)(obs["policy"].double().numpy()) - want).max() < 1e-5
+
+
+def test_gain_scale_zero_gives_the_agents_fixed_gains():
+    """The gain curriculum: gain_scale 0 = kKp / kKd whatever the gain outputs; 0.5 = half the log2 range."""
+    con = C.Contract(torch.float64)
+    a = torch.randn(4, C.NUM_ACTIONS, dtype=torch.float64) * 3
+    t1, _, _ = con.decode(a)
+    t0, kp0, kd0 = con.decode(a, 0.0)
+    assert torch.equal(t0, t1)
+    assert torch.allclose(kp0, con.kp_ref.expand(4, -1)) and torch.allclose(kd0, con.kd_ref.expand(4, -1))
+    _, kph, _ = con.decode(a, 0.5)
+    ratio = torch.log2(kph / con.kp_ref)
+    assert (ratio.abs() <= 0.5 * C.GAIN_RANGE + 1e-12).all()
+
+
+def test_curriculum_starts_without_movement_costs_and_with_fixed_gains():
+    from rl.getup.env import GetUpConfig, GetUpEnv
+    env = GetUpEnv(GetUpConfig(num_envs=4, device=DEVICE, dtype="float64", library_size=8))
+    assert env.energy_scale == 0.0 and env.gain_scale == 0.0
+    env.step(torch.randn(4, C.NUM_ACTIONS, dtype=torch.float64))
+    s = env.curriculum_state()
+    assert s["gain_scale"] == 0.0 and s["gain_start_iter"] is None
+    # the gains unlock once both lying starts succeed often enough, then ramp
+    for k in env.kinds:
+        env.success_ema[k] = 0.6
+    env.extra_log = {}
+    env._update_curriculum(torch.arange(4))
+    assert env.gain_start_iter is not None
+    env.common_step_counter += 250 * env.cfg.steps_per_env
+    env._update_curriculum(torch.arange(4))
+    assert 0.4 < env.gain_scale < 0.6
+    env.load_curriculum_state({**s, "gain_scale": 1.0})
+    assert env.gain_scale == 1.0
+    old = {k: v for k, v in s.items() if not k.startswith("gain_")}   # a checkpoint from before: full range
+    env.load_curriculum_state(old)
+    assert env.gain_scale == 1.0

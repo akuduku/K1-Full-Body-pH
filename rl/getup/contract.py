@@ -66,10 +66,15 @@ class Contract:
         """117 inputs: gyro | gravity | theta - HOME | qd | last action (66, raw policy output) | tank level / capacity."""
         return torch.cat((gyro, gravity, theta - self.home, qd, last_action, tank_fraction[:, None]), -1)
 
-    def decode(self, actions: torch.Tensor):
-        """(B,66) raw policy output -> joint targets, stiffness kp, damping kd, each (B,22) in firmware order."""
+    def decode(self, actions: torch.Tensor, gain_scale: float = 1.0):
+        """(B,66) raw policy output -> joint targets, stiffness kp, damping kd, each (B,22) in firmware order.
+
+        gain_scale in [0, 1] (the env's gain curriculum): 0 = the agent's fixed gains kKp / kKd whatever the gain
+        outputs say (the stock StandupAgent), 1 = the full range x 2^(+-GAIN_RANGE).  A trained policy is decoded with
+        the gain_scale it ended its training with (saved in the checkpoint's curriculum state)."""
         a_t, a_k, a_d = actions[:, :NJ], actions[:, NJ:2 * NJ], actions[:, 2 * NJ:]
         target = self.home + self.action_scale * a_t
-        kp = self.kp_ref * torch.exp2(GAIN_RANGE * torch.tanh(a_k))
-        kd = self.kd_ref * torch.exp2(GAIN_RANGE * torch.tanh(a_d))
+        r = GAIN_RANGE * float(gain_scale)
+        kp = self.kp_ref * torch.exp2(r * torch.tanh(a_k))
+        kd = self.kd_ref * torch.exp2(r * torch.tanh(a_d))
         return target, kp, kd

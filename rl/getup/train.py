@@ -61,6 +61,10 @@ def main():
     ap.add_argument("--push-dv", type=float, default=0.3)
     ap.add_argument("--library-rounds", type=int, default=1)
     ap.add_argument("--reward", action="append", help="NAME=WEIGHT, overrides a reward weight (repeatable)")
+    ap.add_argument("--energy-scale-lo", type=float, default=0.0,
+                    help="weight of battery/impacts before the robot gets up (old runs: 0.25)")
+    ap.add_argument("--gain-free-ema", type=float, default=0.5,
+                    help="lying success EMA that unlocks the variable gains (<0: free from the start, old runs)")
     ap.set_defaults(video_seconds=10.0)
     args = ap.parse_args()
 
@@ -69,7 +73,9 @@ def main():
                       steps_per_env=args.steps_per_env, delay_ms=(lo, hi), tank=not args.no_tank,
                       tank_capacity=args.tank_capacity, tank_refill=args.tank_refill, assist_force=args.assist_n,
                       lying_kinds=tuple(k.strip() for k in args.lying_kinds.split(",") if k.strip()),
-                      push_dv=args.push_dv, library_rounds=args.library_rounds, rewards=parse_rewards(args.reward))
+                      push_dv=args.push_dv, library_rounds=args.library_rounds, rewards=parse_rewards(args.reward),
+                      energy_scale_lo=args.energy_scale_lo,
+                      gain_free_ema=None if args.gain_free_ema < 0 else args.gain_free_ema)
     env = GetUpEnv(cfg)
     print(f"[getup] {args.num_envs} robots on {args.device}, stand trunk z {env.stand_z:.3f} m, CoM {env.com_low:.3f} "
           f"-> {env.com_stand:.3f} m, tank {'off' if args.no_tank else f'{args.tank_capacity:g} J'}, assist "

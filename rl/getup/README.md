@@ -42,7 +42,16 @@ Default capacity 150 J; `--no-tank` is the ablation.
     reaches 50 %;
   - then the **head penalties** ramp in (the neck breaks on head strikes);
   - then **strong pushes** (×2.5) on standing robots knock them over now and then;
-  - the **energy weight** grows from ×0.25 to ×1 as the success goes from 50 % to 90 %: get up first, then cheaply.
+  - the **variable gains** start locked: until both lying starts succeed 50 % of the time the driver gets the
+    agent's fixed kKp / kKd (as the stock StandupAgent and RL_Core's get-up recipe), then the 44 gain outputs ramp
+    in over 500 iterations (`gain_scale` 0 → 1, in the checkpoint; the action-rate penalty on them ramps with it);
+  - the **costs of moving** (battery and impacts) grow from ×0 to ×1 as the success goes from 50 % to 90 %: get up
+    first, then cheaply.
+  - Why (runs getup-ph-v1 and getup-ph-notank-v1, 2026-11-01/02): with the battery term at ×0.25 from the start and
+    the gains free, the lying robots never stood up in 2256 iterations (success 0 %). The battery penalty of a
+    get-up attempt was larger than the height and upright rewards (episode sums −22 vs +9), so the policy learnt
+    to go limp lying down: stiffness ×0.4, battery 350 → 16 W. The standing starts stayed up (100 %). The tank
+    never limited anything. Old behaviour: `--energy-scale-lo 0.25 --gain-free-ema -1`.
 - **Rewards:**
 
 | term | weight | from |
@@ -52,12 +61,12 @@ Default capacity 150 J; `--no-tank` is the ablation.
 | standing | 6 | bonus while high, upright, both feet down, nothing else touching |
 | stillness | −2 /J | kinetic energy T of H while standing |
 | battery | −0.03 /W × curriculum | electrical power drawn from the battery, `max(Δ supplied / dt, 0)`: work **and** heat |
-| impacts | −0.02 /W | power dissipated in the contact elements (impacts, sliding) |
+| impacts | −0.02 /W × curriculum | power dissipated in the contact elements (impacts, sliding) |
 | end_stops | −0.1 /W | power dissipated in the end stops |
 | voltage_margin | −1 | `|R τ / k + k q̇| / V > 0.8`: the motor far out on its torque-speed line |
 | torque_margin, soft_joint_limits, target_beyond_limits | −2, −2, −0.5 | as RL_Core |
 | self_proximity | −2 | the plant has no self-collision: the get-up example's 10 limb pairs, closer than 9 cm |
-| action_rate, joint_acc | −0.01, −2.5e-7 | smoothness (the rate covers the gains too) |
+| action_rate, joint_acc | −0.01, −2.5e-7 | smoothness (the rate covers the gains × the gain curriculum) |
 | head_contact, head_impact, neck_torque | −1, −2, −2 × curriculum | as RL_Core |
 
 - **Logged:**
@@ -115,8 +124,9 @@ gains once before the control loop (`kp_run = agent->kp()`, main.cpp:897). A new
    with the last action extended to 66, plus the tank level / capacity.
 2. **Decode 66 outputs:**
    - targets `kHome + 0.25·kEffort/kKp·a[0:22]`;
-   - `kp = kKp·2^(1.5·tanh a[22:44])`;
-   - `kd = kKd·2^(1.5·tanh a[44:66])`.
+   - `kp = kKp·2^(1.5·s·tanh a[22:44])`;
+   - `kd = kKd·2^(1.5·s·tanh a[44:66])`, with `s` = the policy's `gain_scale` at the end of its training (1 once
+     the gain curriculum has finished; 0 = fixed gains).
 3. **Run the tank of `impedance.py` once per 20 ms:**
    - refill `Σ kd q̇² dt`;
    - injection `S(new) − S(old)` at the measured q, with the target after `apply_safety`;

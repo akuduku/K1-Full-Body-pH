@@ -63,7 +63,7 @@ REWARDS = {
     "target_beyond_limits": -0.5,  # rad of decoded target beyond the joint range
     "self_proximity": -2.0,      # the plant has no self-collision: limb pairs that never touch, closer than 9 cm
     # smoothness
-    "action_rate": -0.01,        # over all 66 outputs (targets and gains)
+    "action_rate": -0.01,        # the 22 targets, + the 44 gain outputs x the gain curriculum
     "joint_acc": -2.5e-7,
     # head and neck (the neck breaks on head strikes; ramp in once it gets up)
     "head_contact": -1.0,
@@ -72,7 +72,10 @@ REWARDS = {
     # NaN / explosion, the only non-timeout end
     "exploded": -200.0,
 }
-ENERGY_TERMS = ("battery",)
+# costs of moving: weighted by the energy curriculum, which starts at 0 (get up first, then cheaply). With a
+# penalty from the start the policy learnt to go limp lying down (stiffness x0.4, 350 -> 16 W) and never got up
+# (runs getup-ph-v1, getup-ph-notank-v1).  impacts = contact dissipation, which pushing up from the floor causes.
+ENERGY_TERMS = ("battery", "impacts")
 HEAD_TERMS = ("head_contact", "head_impact", "neck_torque")
 # the get-up example's self-contact proxy (Stand Up humanoid_standup/robot_config.py): link origins, pairs of
 # non-adjacent limbs that should never press together (tuck-safe: no hand/foot/knee - trunk pairs)
@@ -119,8 +122,13 @@ class GetUpConfig:
     head_penalty_ema: float = 0.5
     head_ramp_iters: int = 500
     # energy curriculum: the energy terms' weight x lo .. 1 as the success EMA goes from ema_lo to ema_hi
-    energy_scale_lo: float = 0.25
+    energy_scale_lo: float = 0.0
     energy_ema: tuple = (0.5, 0.9)
+    # gain curriculum: the 44 gain outputs act only once both lying starts succeed this often (None: from the
+    # start), then ramp in over gain_ramp_iters; before that the driver gets the agent's fixed gains, as the stock
+    # StandupAgent (RL_Core's get-up recipe): learn to get up first, then variable impedance
+    gain_free_ema: float | None = 0.5
+    gain_ramp_iters: int = 500
     # pushes on standing robots; strong pushes (x strong_push_scale) ramp in once the head penalties are full
     push_interval_s: tuple = (3.0, 6.0)
     push_dv: float = 0.3
@@ -205,6 +213,8 @@ class GetUpEnv(VecEnv):
         self.head_start_iter, self.head_scale = None, 0.0
         self.push_start_iter, self.push_scale = None, 1.0
         self.energy_scale = cfg.energy_scale_lo
+        self.gain_start_iter = None
+        self.gain_scale = 1.0 if cfg.gain_free_ema is None else 0.0
 
         # the stand reference: HOME with the soles on the floor
         self.plant.reset(pose=self.contract.home)
@@ -328,6 +338,12 @@ class GetUpEnv(VecEnv):
         if self.push_start_iter is not None:
             ramp = min(1.0, (it - self.push_start_iter) / max(1, c.strong_push_ramp_iters))
             self.push_scale = 1.0 + (c.strong_push_scale - 1.0) * ramp
+        if c.gain_free_ema is not None:
+            if self.gain_start_iter is None and ema >= c.gain_free_ema:
+                self.gain_start_iter = it
+                print(f"[getup] variable gains ramp in from iteration {it:.0f}", flush=True)
+            if self.gain_start_iter is not None:
+                self.gain_scale = min(1.0, (it - self.gain_start_iter) / max(1, c.gain_ramp_iters))
         e_lo, e_hi = c.energy_ema
         self.energy_scale = c.energy_scale_lo + (1.0 - c.energy_scale_lo) * min(1.0, max(0.0, (ema - e_lo) / (e_hi - e_lo)))
         log["Curriculum/lying_share"] = self.lying_share
@@ -335,6 +351,7 @@ class GetUpEnv(VecEnv):
         log["Curriculum/head_scale"] = self.head_scale
         log["Curriculum/push_scale"] = self.push_scale
         log["Curriculum/energy_scale"] = self.energy_scale
+        log["Curriculum/gain_scale"] = self.gain_scale
         for k in self.kinds:
             log[f"Curriculum/assist_{KIND_NAMES[k]}_N"] = c.assist_force * self.assist_scale[k]
 
@@ -344,7 +361,8 @@ class GetUpEnv(VecEnv):
                 "assist_scale": {KIND_NAMES[k]: v for k, v in self.assist_scale.items()},
                 "lying_share": self.lying_share, "head_start_iter": self.head_start_iter, "head_scale": self.head_scale,
                 "push_start_iter": self.push_start_iter, "push_scale": self.push_scale,
-                "energy_scale": self.energy_scale, "common_step_counter": self.common_step_counter}
+                "energy_scale": self.energy_scale, "gain_start_iter": self.gain_start_iter,
+                "gain_scale": self.gain_scale, "common_step_counter": self.common_step_counter}
 
     def load_curriculum_state(self, s: dict) -> None:
         for k in self.kinds:
@@ -354,6 +372,8 @@ class GetUpEnv(VecEnv):
         self.head_start_iter, self.head_scale = s["head_start_iter"], float(s["head_scale"])
         self.push_start_iter, self.push_scale = s["push_start_iter"], float(s["push_scale"])
         self.energy_scale = float(s["energy_scale"])
+        self.gain_start_iter = s.get("gain_start_iter")
+        self.gain_scale = float(s.get("gain_scale", 1.0))  # checkpoints from before the gain curriculum: full range
         self.common_step_counter = int(s["common_step_counter"])
 
     # ------------------------------------------------------------ external inputs
@@ -415,7 +435,10 @@ class GetUpEnv(VecEnv):
             "soft_joint_limits": ((self.soft_lo - theta).clamp_min(0) + (theta - self.soft_hi).clamp_min(0)).sum(-1),
             "target_beyond_limits": excess.abs().sum(-1),
             "self_proximity": (1.0 - d / 0.09).clamp(0.0, 1.0).sum(-1),
-            "action_rate": (self.actions - self.prev_actions).square().sum(-1),
+            "action_rate": ((self.actions - self.prev_actions).square()
+                            * torch.cat((torch.ones(NJ, dtype=self.dtype, device=self.device),
+                                         torch.full((2 * NJ,), self.gain_scale, dtype=self.dtype,
+                                                    device=self.device)))).sum(-1),
             "joint_acc": ((self.qd - self.prev_qd) / dt).square().sum(-1),
             "head_contact": head_touch.to(self.dtype),
             "head_impact": ((head_f - 50.0).clamp_min(0.0) / 100.0).clamp(max=10.0).sum(-1),
@@ -453,7 +476,7 @@ class GetUpEnv(VecEnv):
         a = torch.nan_to_num(actions.to(self.device, self.dtype)).clamp(-c.action_guard, c.action_guard)
         self.prev_actions = self.actions
         self.actions = a
-        target_raw, kp, kd = self.contract.decode(a)
+        target_raw, kp, kd = self.contract.decode(a, self.gain_scale)
         kp, kd = kp * self.gain_err_kp, kd * self.gain_err_kd  # what the driver really applies
         theta = self.plant.theta
         filt = lambda t, k, d: fw.safety_filter(m, self.fw, t, self.plant.last_target, theta, self.qd, k, d)  # noqa: E731
