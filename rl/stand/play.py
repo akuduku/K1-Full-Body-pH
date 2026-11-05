@@ -9,6 +9,8 @@ Push: in the MuJoCo window DOUBLE-CLICK a body to select it, then hold CTRL + RI
 spring pulls the selected point towards the mouse (MuJoCo's rule: stiffness x the mass hanging on that body;
 the window draws the spring).  The slider "push strength" under the plot scales that force (x0 .. x5).
 R (in the MuJoCo window) puts the robot back on its feet; it also stands up again by itself 2 s after a fall.
+The MuJoCo window shows only the scene (no side panels; --panels brings them back, or TAB / SHIFT+TAB toggles the
+left / right panel).  Q or ESC (in the MuJoCo window) quits; closing either window or CTRL+C in the terminal too.
 
 What runs: the stand agent exactly as in training -- rl/stand/contract.py observation and decode, the firmware's
 gains, filter (clamp, slew, target clamp, overspeed guard), transport delay and motor driver
@@ -85,6 +87,7 @@ def main():
     ap.add_argument("--strength", type=float, default=1.0, help="start value of the push-strength slider")
     ap.add_argument("--max-force", type=float, default=100.0, help="largest push at strength x1 [N]")
     ap.add_argument("--no-viewer", action="store_true", help="headless: scripted pushes on the trunk, plot to a PNG")
+    ap.add_argument("--panels", action="store_true", help="show MuJoCo's left and right panels (TAB / SHIFT+TAB toggle them)")
     ap.add_argument("--test-force", type=float, default=60.0, help="headless: N of the scripted pushes")
     args = ap.parse_args()
 
@@ -111,7 +114,7 @@ def main():
     subtree = {b: float(mj.body_subtreemass[mujoco.mj_name2id(mj, mujoco.mjtObj.mjOBJ_BODY, n)])
                for b, n in enumerate(model.body_names)}
     stiffness = float(mj.vis.map.stiffness)
-    state = {"reset": True, "fell_at": None}
+    state = {"reset": True, "fell_at": None, "quit": False}
 
     # MuJoCo window: draws the pH plant's pose, catches the mouse
     viewer, vdata = None, None
@@ -121,9 +124,13 @@ def main():
         def on_key(keycode):
             if keycode in (ord("R"), ord("r")):
                 state["reset"] = True
+            elif keycode in (ord("Q"), ord("q"), 256):  # 256 = GLFW_KEY_ESCAPE
+                state["quit"] = True
 
         vdata = mujoco.MjData(mj)
-        viewer = mujoco.viewer.launch_passive(mj, vdata, key_callback=on_key)
+        viewer = mujoco.viewer.launch_passive(mj, vdata, key_callback=on_key,
+                                              show_left_ui=args.panels, show_right_ui=args.panels)
+        print("[play] MuJoCo window: Q or ESC quits, R resets, TAB / SHIFT+TAB toggle the side panels", flush=True)
 
     # the plot
     plt.ion()
@@ -157,7 +164,7 @@ def main():
             if state["reset"]:
                 do_reset()
                 state["t_reset"] = t
-            if args.seconds and t >= args.seconds:
+            if args.seconds and t >= args.seconds or state["quit"]:
                 break
             if viewer is not None and not viewer.is_running():
                 break

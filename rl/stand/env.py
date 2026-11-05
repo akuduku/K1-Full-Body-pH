@@ -60,7 +60,8 @@ class StandConfig:
     plant_dt: float = 1e-3
     joint_noise: float = 0.02        # rad, start pose noise
     gain_dr: float = 0.10            # kp, kd x U(1 - gain_dr, 1 + gain_dr) per robot and joint, per episode
-    delay_ms: tuple = (10.0, 40.0)   # transport delay, drawn per robot per episode
+    delay_ms: tuple = (10.0, 70.0)   # transport delay (k1_skill_cfg: 2..14 steps of 5 ms)
+    delay_hold_prob: float = 0.3     # k1_skill_cfg: the lag is kept for a policy step with probability 0.3
     slew: bool = C.SLEW
     push_interval_s: tuple = (4.0, 8.0)
     push_dv: float = 0.3             # max horizontal trunk velocity change of a push [m/s]; 0 = no pushes
@@ -87,7 +88,8 @@ class StandEnv(VecEnv):
         model = load_k1(dtype=self.dtype, device=self.device)
         C.check_joint_order(model.joint_names)
         self.model = model
-        fw = FirmwareConfig(gains=C.GAINS, slew=cfg.slew, delay_ms=tuple(cfg.delay_ms), policy_dt=cfg.policy_dt)
+        fw = FirmwareConfig(gains=C.GAINS, slew=cfg.slew, delay_ms=tuple(cfg.delay_ms), policy_dt=cfg.policy_dt,
+                        delay_hold_prob=cfg.delay_hold_prob)
         self.plant = K1PHPlantNative(model=model, batch=B, timestep=cfg.plant_dt, firmware=fw)
         self.contract = C.Contract(self.dtype, self.device)
         self.base_kp, self.base_kd = (g.clone() for g in self.plant.gains())

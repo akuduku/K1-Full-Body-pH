@@ -231,7 +231,7 @@ def check_motors():
             want = min(cap, effort, line) if w_knee < w_max else min(cap, line)
             worst = max(worst, abs(tau - want) / effort)
         msgs.append(f"{t}: k={k:.3f} R={R:.4f} brake k^2/R={k * k / R:.2f}")
-    report("motors", worst < 1e-9, f"max envelope error {worst:.1e} (ceiling = MJCF forcerange) | " + ", ".join(msgs))
+    report("motors", worst < 1e-9, f"max envelope error {worst:.1e} (ceiling = servo.EFFORT) | " + ", ".join(msgs))
 
 
 def check_arm():

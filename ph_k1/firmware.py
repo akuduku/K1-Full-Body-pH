@@ -8,11 +8,13 @@ firmware/src/safety.cpp), copied term by term so that a policy trained on the pH
            1 position clamp to the firmware range          (k1_config.h joint_pos_lower/upper = MJCF range)
            2 slew  |t - t_last| <= max_target_velocity * policy_dt          (per agent on/off: agent->slew())
            3 target clamp so the driver's PD torque  kp (t - q) - kd qdot  stays within +-effort
+             (the agent's own effort table if it has one, Agent::effort(), else k1_config.h effort_limit)
            4 overspeed guard: qdot > max_joint_velocity -> t <= q   (and mirrored)
       -> held for the whole policy step (main.cpp sends the same LowCmd q/kp/kd every 5 ms)
       -> transport delay (DDS, motor bus, driver): `lag` plant steps, randomised (not identified on the robot;
          the 25 Oct getup log is 10-40 ms slower than the delay-free plant, RL_Core trains 10-70 ms)
       -> motor driver: PD  kp (t - q) - kd qdot, limited by what the motor can deliver at this speed
+         (servo.py = k1_skill_cfg.py: torque ceiling and torque-speed curve, e.g. knee 112 N m, hip roll 76 N m)
       -> coil current -> torque: the pH plant.  Volts are a plant-internal quantity, never a policy output.
 
 The robot logs joint angles, the gyro and the accelerometer at 500 Hz; `imu_step` gives the same signals.
@@ -28,6 +30,7 @@ from dataclasses import dataclass
 
 import torch
 
+from . import servo
 from .drive import GAINS, _group
 from .model import NB, NJ, K1Model
 
@@ -67,9 +70,15 @@ GAIN_PRESETS = {
     # k1_config.h Prepare::stiffness / damping (Booster's prepare pose)
     "prepare": ((40.0, 40.0) + (40.0, 50.0, 20.0, 20.0) * 2 + (350.0, 350.0, 180.0, 350.0, 250.0, 250.0) * 2,
                 (1.5, 1.5) + (0.5, 1.5, 0.2, 0.2) * 2 + (7.5, 7.5, 3.0, 5.5, 5.0, 5.0) * 2),
-    # src/agents/sprint.cpp kKp / kKd: the sprint agent's gains, also the standup agent's (StandupAgent)
-    "standup": ((4.0, 4.0) + (10.0,) * 8 + (80.0, 80.0, 80.0, 80.0, 50.0, 50.0) * 2,
-                (0.25, 0.25) + (1.0,) * 8 + (4.0, 4.0, 4.0, 4.0, 5.6, 3.0) * 2),
+    # the sprint / standup agents' gains = k1_skill_cfg.py (sprint.cpp kKd rounds the ankles to 5.6 / 3.0)
+    "standup": (servo.KP, servo.KD),
+}
+
+
+# Agent::effort() of the agents that override the safety clamp: sprint.cpp kEffort (SprintAgent and StandupAgent)
+# = k1_skill_cfg's effort.  Agents without an entry use EFFORT_LIMIT.
+AGENT_EFFORT = {
+    "standup": servo.EFFORT,
 }
 
 
@@ -84,7 +93,7 @@ class FirmwareConfig:
     target_clamp: bool = True        # step 3   (always on in the firmware)
     overspeed_guard: bool = True     # step 4   (always on in the firmware)
     policy_dt: float = 0.02          # k1_config.h kDt
-    delay_ms: tuple[float, float] = (10.0, 40.0)  # transport delay, drawn per robot at reset
+    delay_ms: tuple[float, float] = servo.DELAY_MS  # transport delay, drawn per robot at reset (k1_skill_cfg 10-70 ms)
     delay_hold_prob: float | None = None  # None: one lag per episode; p: keep it with prob p every policy step
     max_delay_ms: float = 100.0      # length of the delay line
     # kp/kd through the delay line with the target (they share the LowCmd); matters when a policy changes the
@@ -113,6 +122,11 @@ def gains(model: K1Model, preset: str = "walk", gain_scale: float = 1.0):
     return T(pair[0]), T(pair[1])
 
 
+def effort_limit(cfg: FirmwareConfig) -> tuple[float, ...]:
+    """The safety layer's torque clamp for the agent behind cfg.gains (safety.cpp: agent effort or effort_limit)."""
+    return AGENT_EFFORT.get(cfg.gains, EFFORT_LIMIT)
+
+
 def firmware_table(model: K1Model, table) -> torch.Tensor:
     return torch.as_tensor(table, dtype=model.dtype, device=model.device)
 
@@ -126,7 +140,7 @@ def safety_filter(model: K1Model, cfg: FirmwareConfig, target, last, q, qd, kp, 
         d = firmware_table(model, MAX_TARGET_VELOCITY) * cfg.policy_dt
         t = torch.minimum(torch.maximum(t, last - d), last + d)
     if cfg.target_clamp:
-        eff = firmware_table(model, EFFORT_LIMIT)
+        eff = firmware_table(model, effort_limit(cfg))
         damping_term = kd * qd
         safe_kp = torch.where(kp > 0, kp, torch.ones_like(kp))  # the firmware divides by kp (never 0 on the robot)
         lo = q + (-eff + damping_term) / safe_kp

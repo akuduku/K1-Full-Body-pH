@@ -118,7 +118,13 @@ L di/dt = v − R i − s k θ̇,        τ = s k i
 k = V_NOM / ω_max,   R = k V_NOM / τ_stall,   L = (L/R) · R
 ```
 
-`s ≤ 1` caps the torque at the MJCF `forcerange`, which is the deploy limit.
+`s ≤ 1` caps the torque at the effort of Eric Plass's standard K1 skill config
+(`ph_k1/servo.py` = RL_Core `rl_core/envs/k1_skill_cfg.py`: knee 112, hip pitch 68, hip roll 76,
+hip yaw / ankles 38.3, arms 14, head 6 N m). Armature (ankle pitch 0.0396 / roll 0.0113, arms and head
+0.001), passive damping (ankles 0.2, else 0), the torque-speed corners, the stand-up gains and the
+command delay (10–70 ms, kept with probability 0.3) come from the same file, not from `assets/K1`.
+The firmware's target clamp uses the agent's own effort table (`firmware.AGENT_EFFORT`, sprint.cpp
+`kEffort` for the stand-up agent), otherwise `k1_config.h` `effort_limit`.
 
 ### Integrator
 

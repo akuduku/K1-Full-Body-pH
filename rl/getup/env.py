@@ -92,7 +92,8 @@ class GetUpConfig:
     policy_dt: float = 0.02
     plant_dt: float = 1e-3
     steps_per_env: int = 24           # PPO rollout length: the curriculum counts iterations with it
-    delay_ms: tuple = (10.0, 40.0)
+    delay_ms: tuple = (10.0, 70.0)    # k1_skill_cfg: 2..14 steps of 5 ms
+    delay_hold_prob: float = 0.3      # k1_skill_cfg: the lag is kept for a policy step with probability 0.3
     gain_dr: float = 0.10             # the driver's real gains = commanded x U(1 -+ gain_dr), per robot and episode
     obs_noise: dict = field(default_factory=lambda: {"gyro": 0.2, "gravity": 0.05, "joint_pos": 0.01, "joint_vel": 1.0})
     action_guard: float = 100.0
@@ -149,7 +150,7 @@ class GetUpEnv(VecEnv):
         C.check_joint_order(model.joint_names)
         self.model = model
         self.fw = fw.FirmwareConfig(gains=C.GAINS, slew=C.SLEW, delay_ms=tuple(cfg.delay_ms), policy_dt=cfg.policy_dt,
-                                    delay_gains=True)
+                                    delay_hold_prob=cfg.delay_hold_prob, delay_gains=True)
         self.plant = K1PHPlantNative(model=model, batch=B, timestep=cfg.plant_dt, firmware=self.fw)
         self.contract = C.Contract(self.dtype, self.device)
         self.kp0, self.kd0 = (g.clone() for g in self.plant.gains())  # the agent's gains before its first command

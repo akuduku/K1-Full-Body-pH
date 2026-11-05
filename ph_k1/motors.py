@@ -4,7 +4,7 @@
     tau     = s k i                          (gyrator, same s both ways)
 
 Every motor is the equivalent DC motor whose full-voltage torque-speed line
-passes through the Booster datasheet corners (rl_core/plant/k1.py):
+passes through the corners of k1_skill_cfg's torque-speed curve (servo.py):
 
     effort E up to the knee speed w_k, then a straight line to 0 at w_max.
     unclipped stall  tau0 = E w_max / (w_max - w_k)
@@ -15,12 +15,12 @@ passes through the Booster datasheet corners (rl_core/plant/k1.py):
 This is exactly the derivation of the arm plant (Right Hand Model/plant.py),
 so the four right-arm motors here are identical to the arm's R14 motors.
 
-The torque ceiling s = min(1, tau_max / |k i|) uses the MJCF <motor>
-forcerange (the deploy limit: knee 40, hip pitch 30, arms 14, head 6 N m),
-not the larger datasheet peak.
+The torque ceiling s = min(1, tau_max / |k i|) is k1_skill_cfg's effort
+(servo.EFFORT: knee 112, hip pitch 68, hip roll 76, hip yaw / ankles 38.3,
+arms 14, head 6 N m), not the forcerange of our MJCF (knee 40, hip pitch 30).
+Passive joint damping as k1_skill_cfg: 0.2 on the ankles, 0 elsewhere.
 
-PLACEHOLDERS (ask Booster for real values): V_NOM, ELECTRICAL_TIME,
-JOINT_DAMPING.  Volts/amperes are this model's internal units; what matches
+PLACEHOLDERS (ask Booster for real values): V_NOM, ELECTRICAL_TIME.  Volts/amperes are this model's internal units; what matches
 the robot is torque against joint speed.
 """
 
@@ -30,21 +30,17 @@ from dataclasses import dataclass
 
 import torch
 
+from . import servo
 from .model import K1Model
 
 V_NOM = 7.0  # V, full-scale command (same as the arm plant)
 ELECTRICAL_TIME = 0.05  # s, L/R (same as the arm plant)
-JOINT_DAMPING = 0.08  # N m s/rad gearbox viscous friction (arm plant value)
+JOINT_DAMPING = servo.JOINT_DAMPING  # N m s/rad passive damping of the non-ankle joints (k1_skill_cfg: none)
 
-# (effort N m, no-load speed rad/s, knee speed rad/s)  -- rl_core/plant/k1.py
-DATASHEET = {
-    "E6408": (68.0, 14.66, 1.88),  # hip pitch
-    "E4315": (76.0, 12.57, 2.62),  # hip roll
-    "E4310": (38.3, 17.59, 7.85),  # hip yaw, ankles
-    "E6416": (112.0, 12.57, 2.09),  # knee
-    "R14": (14.0, 33.51, 5.24),  # arms
-    "HT4438": (6.0, 7.85, 10.47),  # neck: knee > no-load, see below
-}
+ANKLE_DAMPING = servo.ANKLE_PASSIVE_DAMPING  # N m s/rad passive ankle damping (k1_skill_cfg)
+
+# (effort N m, no-load speed rad/s, knee speed rad/s): k1_skill_cfg's torque-speed curve
+DATASHEET = dict(servo.MOTOR_CURVE)
 
 
 def motor_type(joint_name: str) -> str:
@@ -89,7 +85,7 @@ def build_motors(model: K1Model, v_nom: float = V_NOM, electrical_time: float = 
     for name in model.joint_names:
         t = motor_type(name)
         effort, w_max, w_knee = DATASHEET[t]
-        # HT4438: its knee lies beyond no-load speed, so the envelope is just
+        # HT4438: its knee is at no-load speed, so the envelope is just
         # the straight DC line from `effort` at stall to 0 at w_max.
         stall = effort * w_max / (w_max - w_knee) if w_knee < w_max else effort
         k = v_nom / w_max
@@ -102,8 +98,8 @@ def build_motors(model: K1Model, v_nom: float = V_NOM, electrical_time: float = 
         k=k,
         R=R,
         L=electrical_time * R,
-        tau_max=model.forcerange.clone(),
-        damping=torch.full_like(k, joint_damping),
+        tau_max=model.effort.clone(),
+        damping=T([ANKLE_DAMPING if "ankle" in n.lower() else joint_damping for n in model.joint_names]),
         v_max=v_nom,
         types=types,
     )

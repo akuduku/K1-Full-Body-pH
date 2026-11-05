@@ -1,8 +1,14 @@
 """The K1 as numbers: read the MJCF ONCE, then never ask MuJoCo again.
 
 MuJoCo is used here only as an XML parser: masses, inertia tensors, link
-offsets, hinge axes, armature, joint ranges, foot boxes.  Stepping,
-contact and forces are all ours (dynamics.py, contact.py, plant.py).
+offsets, hinge axes, joint ranges, foot boxes.  Stepping, contact and forces
+are all ours (dynamics.py, contact.py, plant.py).
+
+The servo numbers do NOT come from this MJCF: armature and torque ceiling
+are Eric Plass's k1_skill_cfg.py values (servo.py).
+This MJCF has the old ankle armature (0.0565 = 2x E4310 on both axes) and
+older, lower <motor forcerange> (knee 40, hip pitch 30 N m);
+`apply_servo_table` overwrites them in every MjModel used next to the plant.
 
 Generalised velocity (28):
     nu = (omega_B, v_B, theta_dot)
@@ -21,6 +27,8 @@ from pathlib import Path
 import mujoco
 import numpy as np
 import torch
+
+from . import servo
 
 HERE = Path(__file__).resolve().parent
 # Bundled copy (assets/K1, with meshes); falls back to the thesis folder layout.
@@ -101,12 +109,13 @@ class K1Model:
     mass: torch.Tensor  # (nb,)
     ipos: torch.Tensor  # (nb,3) COM in body frame
     I_body: torch.Tensor  # (nb,3,3) rotational inertia about COM, body frame
-    armature: torch.Tensor  # (22,)
+    armature: torch.Tensor  # (22,) servo.ARMATURE (reflected motor inertia, k1_skill_cfg)
     jnt_low: torch.Tensor  # (22,) MJCF range = the firmware's command clamp
     jnt_high: torch.Tensor  # (22,)
     stop_low: torch.Tensor  # (22,) mechanical end stops (end-stop springs), wider: see MEASURED_RANGE
     stop_high: torch.Tensor  # (22,)
-    forcerange: torch.Tensor  # (22,) |tau| ceiling of the MJCF <motor>
+    forcerange: torch.Tensor  # (22,) |tau| ceiling of this MJCF's <motor> as authored (= k1_config.h effort_limit)
+    effort: torch.Tensor  # (22,) servo.EFFORT: the torque ceiling of k1_skill_cfg (the plant's)
     support: torch.Tensor  # (nb,28) 1 if dof d moves body b
     subtree: torch.Tensor  # (22,nb) 1 if body b is at/after hinge k
     contact_body: torch.Tensor  # (nc,) body index of every sole point
@@ -130,6 +139,23 @@ class K1Model:
         for name, val in (pose or {}).items():
             theta[self.joint_index(name)] = val
         return theta
+
+
+def _check_table_order(joint_names: list[str]) -> None:
+    """servo.JOINTS and the MJCF hinges must be the same 22 joints in the same order."""
+    norm = lambda n: n.lstrip("A").lower()  # noqa: E731  MJCF prefixes A/AA for the sort order
+    if [norm(n) for n in joint_names] != [n.lower() for n in servo.JOINTS]:
+        raise ValueError(f"MJCF joint order {joint_names} differs from servo.JOINTS {servo.JOINTS}")
+
+
+def apply_servo_table(m: mujoco.MjModel) -> mujoco.MjModel:
+    """Overwrite the MJCF's servo numbers with k1_skill_cfg's (servo.py): armature and force range."""
+    _check_table_order([mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j) for j in range(1, m.njnt)])
+    m.dof_armature[NB:] = servo.ARMATURE  # (the ankles' damping 0.2 is the plant's motor damping, motors.py)
+    for a in range(m.nu):
+        j = int(m.actuator_trnid[a, 0]) - 1
+        m.actuator_forcerange[a] = (-servo.EFFORT[j], servo.EFFORT[j])
+    return m
 
 
 def load_k1(
@@ -224,6 +250,7 @@ def load_k1(
     for a in range(m.nu):
         j = int(m.actuator_trnid[a, 0]) - 1
         act_range[j] = m.actuator_forcerange[a, 1] if m.actuator_forcelimited[a] else np.inf
+    apply_servo_table(m)  # after reading the authored force range
 
     rng = m.jnt_range[1:]
     stop_lo, stop_hi = rng[:, 0] - STOP_TOLERANCE, rng[:, 1] + STOP_TOLERANCE
@@ -256,6 +283,7 @@ def load_k1(
         stop_low=T(stop_lo),
         stop_high=T(stop_hi),
         forcerange=T(act_range),
+        effort=T(servo.EFFORT),
         support=T(support),
         subtree=T(subtree),
         contact_body=torch.as_tensor(cb, device=dev),

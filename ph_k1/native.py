@@ -140,7 +140,7 @@ class K1PHPlantNative(K1PHPlant):
             id(self.model), self.h, self.fixed_base, self.motors_connected, self.gravity, self.dtype, self.device,
             dataclasses.astuple(self.contact), dataclasses.astuple(self.limits), mot.v_max,
             tuple((id(t), t._version) for t in (mot.k, mot.R, mot.L, mot.tau_max, mot.damping)),
-            cfg.pos_clamp, cfg.slew, cfg.target_clamp, cfg.overspeed_guard, cfg.policy_dt,
+            cfg.pos_clamp, cfg.slew, cfg.target_clamp, cfg.overspeed_guard, cfg.policy_dt, fw.effort_limit(cfg),
         )
         if key != self._md_key:
             m = self.model
@@ -153,7 +153,7 @@ class K1PHPlantNative(K1PHPlant):
                 "stop_low": T(m.stop_low), "stop_high": T(m.stop_high),
                 "contact_body": T(m.contact_body), "contact_local": T(m.contact_local),
                 "motor_k": T(mot.k), "motor_R": T(mot.R), "motor_L": T(mot.L), "motor_tau_max": T(mot.tau_max),
-                "motor_damping": T(mot.damping), "fw_effort": T(fw.EFFORT_LIMIT),
+                "motor_damping": T(mot.damping), "fw_effort": T(fw.effort_limit(cfg)),
                 "fw_max_joint_velocity": T(fw.MAX_JOINT_VELOCITY), "fw_max_target_velocity": T(fw.MAX_TARGET_VELOCITY),
             }
             c, lim = self.contact, self.limits

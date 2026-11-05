@@ -37,7 +37,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
 from ph_k1.firmware import FirmwareConfig, safety_filter  # noqa: E402
-from ph_k1.model import load_k1  # noqa: E402
+from ph_k1.model import apply_servo_table, load_k1  # noqa: E402
 from ph_k1.motors import build_motors  # noqa: E402
 from rl.common.export import load_policy  # noqa: E402
 from rl.getup import contract as C  # noqa: E402
@@ -65,7 +65,7 @@ def main():
     cfg = FirmwareConfig(gains=C.GAINS, slew=C.SLEW, delay_gains=True)
     policy = load_policy(args.policy)
 
-    mj = mujoco.MjModel.from_xml_path(str(model.xml_path))
+    mj = apply_servo_table(mujoco.MjModel.from_xml_path(str(model.xml_path)))  # k1_skill_cfg armature + torque
     mj.jnt_range[1:, 0] = model.stop_low.numpy()   # the plant's end stops (wider than the command range)
     mj.jnt_range[1:, 1] = model.stop_high.numpy()
     mj.dof_damping[6:] = mot.damping.numpy()       # the plant's gearbox damping

@@ -22,7 +22,7 @@ import torch
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from ph_k1.firmware import MAX_TARGET_VELOCITY, FirmwareConfig, K1Firmware  # noqa: E402
+from ph_k1.firmware import MAX_TARGET_VELOCITY, FirmwareConfig, K1Firmware, effort_limit  # noqa: E402
 from ph_k1.model import MEASURED_RANGE, NB, NJ, load_k1  # noqa: E402
 from ph_k1.native import K1PHPlantNative  # noqa: E402
 from ph_k1.plant import K1PHPlant  # noqa: E402
@@ -113,7 +113,9 @@ def test_flight_without_gravity(model64):
         pl.contact.enabled = False
         pl.limits.enabled = False
         pl.reset(base_pos=(0.0, 0.0, 1.0))
-    py.p = 0.5 * torch.randn_like(py.p)
+    # 0.2: joints up to ~100 rad/s.  With 0.5 and no passive damping (k1_skill_cfg: only the ankles) the head
+    # (armature 0.001) spins at 200-370 rad/s and the chaotic motion amplifies round-off past 1e-9.
+    py.p = 0.2 * torch.randn_like(py.p)
     copy_state(py, nat)
     for s in range(200):
         py.step()
@@ -132,7 +134,7 @@ def test_saturated_motors(model64):
     for s in range(60):
         a = py.step(v)
         nat.step(v)
-        hit = hit or bool(((model64.forcerange - a.torque.abs()) < 1e-9).any())
+        hit = hit or bool(((model64.effort - a.torque.abs()) < 1e-9).any())
     same_state(py, nat, 1e-7, "saturated")
     assert hit, "some motor should have reached its torque ceiling"
 
@@ -215,7 +217,7 @@ def test_target_clamp_and_overspeed_guard(model64):
     tau = kp * (sent - q) - kd * qd
     # the overspeed guard comes after the target clamp (safety.cpp): t = q then asks for -kd qdot, which may exceed
     # the effort limit (the motor driver caps it).  Every other joint is within it.
-    over = (tau.abs() - model64.forcerange)[~fast]
+    over = (tau.abs() - torch.as_tensor(effort_limit(cfg), dtype=torch.float64, device=DEVICE))[~fast]
     assert over.max() <= 1e-9, "target clamp: PD torque beyond the effort limit"
 
 
