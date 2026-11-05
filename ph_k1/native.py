@@ -17,6 +17,8 @@ K1PHPlant and stays Python.  Differences to K1PHPlant:
   * q, p, xi, lam, the ledger and the command-path state are updated IN PLACE -- clone what you keep
   * StepInfo.extra: "nu" (nu_{n+1}), "volts", "gyro", "acc", and in policy steps "target" (what the driver held)
   * the parameters (contact, limits, motors, firmware, h, switches) are re-sent to C++ whenever they change
+  * plant.robot_params (B, NRP), if set, changes contact, damping and torque ceilings per robot
+    (ph_k1/robot_params.py); it is read at every call
 
 Build once (CPU on the laptop, CUDA where nvcc exists, e.g. Kaggle/Colab):
     cd ph_k1_cuda && python setup.py build_ext --inplace
@@ -202,6 +204,15 @@ class K1PHPlantNative(K1PHPlant):
             return None
         return torch.as_tensor(gen_force, dtype=self.dtype, device=self.device).expand(self.B, NV).contiguous()
 
+    def _robot_rows(self):
+        """plant.robot_params (B, NRP) as the C++ step reads it, or None (the shared constants)."""
+        r = self.robot_params
+        if r is None:
+            return None
+        if r.shape != (self.B, self._native.NRP):
+            raise ValueError(f"robot_params must be ({self.B}, {self._native.NRP}), got {tuple(r.shape)}")
+        return r.to(dtype=self.dtype, device=self.device).contiguous()
+
     def step(self, volts: torch.Tensor | None = None, joint_torque: torch.Tensor | None = None,
              trunk_force: torch.Tensor | None = None, gen_force: torch.Tensor | None = None) -> StepInfo:
         """The plant alone: advance h seconds with these coil volts (same as K1PHPlant.step)."""
@@ -209,7 +220,8 @@ class K1PHPlantNative(K1PHPlant):
         out = self._outputs(policy=False)
         self._native.run(self._model_block(), self.q, self.p, self.xi, self.lam, self._led,
                          volts=self._rows(volts), joint_torque=self._rows(joint_torque),
-                         trunk_force=self._force(trunk_force), gen_force=self._gen(gen_force), nsub=1, **out)
+                         trunk_force=self._force(trunk_force), gen_force=self._gen(gen_force),
+                         robot_params=self._robot_rows(), nsub=1, **out)
         self.time += self.h
         return self._info(out)
 
@@ -255,7 +267,7 @@ class K1PHPlantNative(K1PHPlant):
                          push=None if push_dv is None else torch.as_tensor(push_dv, dtype=self.dtype, device=self.device)
                          .expand(self.B, 3).contiguous(),
                          ring_kp=self.ring_kp, ring_kd=self.ring_kd, trunk_force=self._force(trunk_force),
-                         gen_force=self._gen(gen_force),
+                         gen_force=self._gen(gen_force), robot_params=self._robot_rows(),
                          nsub=int(substeps), **out)
         self.time += substeps * self.h
         return self._info(out)

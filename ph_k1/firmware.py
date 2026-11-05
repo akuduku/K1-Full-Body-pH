@@ -160,12 +160,13 @@ def motor_volts(plant, target, kp, kd, qd=None):
     if qd is None:
         qd = plant.velocity()[:, NB:]
     i = plant.current
+    tau_max = plant.params().tau_max  # per-robot ceilings when plant.robot_params is set
     tau = kp * (target - q) - kd * qd
     avail = ((mot.v_max - mot.k * qd * tau.sign()) * mot.k / mot.R).clamp_min(0)
-    cap = torch.minimum(avail, mot.tau_max)
+    cap = torch.minimum(avail, tau_max)
     tau = torch.maximum(torch.minimum(tau, cap), -cap)
     i_star = tau / mot.k
-    s = mot.gyrator_scale(i)
+    s = mot.gyrator_scale(i, tau_max)
     v = mot.L * (i_star - i) / plant.h + mot.R * i_star + s * mot.k * qd
     return v.clamp(-mot.v_max, mot.v_max)
 

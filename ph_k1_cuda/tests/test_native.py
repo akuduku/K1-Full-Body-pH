@@ -489,3 +489,96 @@ def test_push_on_a_hand_is_work_in_the_ledger(model64):
     flow = (led.supplied.abs() + led.mech_input.abs() + led.dissipated).item()
     # first-order integrator: the balance closes to a few % of the energy that flowed while the body moves
     assert residual.abs().max() < 0.03 * flow + 0.01, f"ledger residual {residual.item():.3f} J of {flow:.2f} J"
+
+
+# ------------------------------------------------------------------ per-robot parameters (ph_k1/robot_params.py)
+def _random_rows(B, seed):
+    from ph_k1.robot_params import RP_DAMP, RP_TAU, neutral_rows
+
+    g = torch.Generator().manual_seed(seed)
+    r = neutral_rows(B, torch.float64)
+    r[:, :5] = torch.exp(0.4 * torch.randn(B, 5, generator=g, dtype=torch.float64))   # contact factors
+    r[:, RP_DAMP:RP_DAMP + NJ] = 0.3 * torch.rand(B, NJ, generator=g, dtype=torch.float64)  # added damping
+    r[:, RP_TAU:RP_TAU + NJ] = 0.5 + torch.rand(B, NJ, generator=g, dtype=torch.float64)    # ceiling factors
+    return r.to(DEVICE)
+
+
+def test_neutral_robot_params_change_nothing(model64):
+    """Rows of ones/zeros give bit for bit the same trajectory as no rows (C++ and Python)."""
+    from ph_k1.robot_params import neutral_rows
+
+    torch.manual_seed(6)
+    B = 3
+    plain, rows = pair(model64, batch=B), pair(model64, batch=B)
+    v = 3.0 * torch.randn(B, NJ, dtype=torch.float64, device=DEVICE)
+    for pl in (*plain, *rows):
+        pl.reset(clearance=-0.001)
+    for pl in rows:
+        pl.robot_params = neutral_rows(B, torch.float64, DEVICE)
+    for _ in range(30):
+        for pl in (*plain, *rows):
+            pl.step(v)
+    for a, b in zip(plain, rows):
+        for name in ("q", "p", "xi", "lam"):
+            assert torch.equal(getattr(a, name), getattr(b, name)), name
+
+
+def test_robot_params_match_reference(model64):
+    """Different contact, damping and torque ceilings per robot: C++ == Python over a contact-rich trajectory
+    with saturated motors, energy ledger included."""
+    torch.manual_seed(7)
+    B = 4
+    py, nat = pair(model64, batch=B)
+    py.reset(clearance=-0.002)
+    py.p = 0.3 * torch.randn_like(py.p)
+    copy_state(py, nat)
+    rows = _random_rows(B, 1)
+    py.robot_params, nat.robot_params = rows, rows.clone()
+    v = 7.0 * torch.sign(torch.randn(B, NJ, dtype=torch.float64, device=DEVICE))
+    for s in range(40):
+        a, b = py.step(v), nat.step(v)
+    same_state(py, nat, 1e-7, "robot params")
+    assert (a.torque - b.torque).abs().max() < 1e-7
+    assert torch.equal(a.contact_active, b.contact_active)
+
+
+def test_one_robot_row_equals_a_global_change(model64):
+    """A robot whose row doubles mu, adds 0.2 damping and halves the torque ceilings moves exactly like a plant
+    whose shared ContactParams/MotorBank were changed that way."""
+    from dataclasses import replace
+
+    from ph_k1.robot_params import RP_DAMP, RP_MU, RP_TAU, neutral_rows
+
+    torch.manual_seed(8)
+    B = 2
+    nat = K1PHPlantNative(model=model64, batch=B)
+    glob = K1PHPlantNative(model=model64, batch=B, contact=replace(nat.contact, mu=2 * nat.contact.mu))
+    glob.motors.damping = glob.motors.damping + 0.2
+    glob.motors.tau_max = glob.motors.tau_max * 0.5
+    rows = neutral_rows(B, torch.float64, DEVICE)
+    rows[:, RP_MU] = 2.0
+    rows[:, RP_DAMP:RP_DAMP + NJ] = 0.2
+    rows[:, RP_TAU:RP_TAU + NJ] = 0.5
+    nat.robot_params = rows
+    for pl in (nat, glob):
+        pl.reset(clearance=-0.001)
+    v = 5.0 * torch.randn(B, NJ, dtype=torch.float64, device=DEVICE)
+    for _ in range(30):
+        nat.step(v)
+        glob.step(v)
+    same_state(glob, nat, 1e-12, "row vs global")
+
+
+def test_robot_params_in_the_command_path(model64):
+    """policy_step with per-robot rows == firmware.K1Firmware on the Python plant with the same rows (the driver's
+    torque cap uses the robot's own ceiling)."""
+    torch.manual_seed(9)
+    cfg = FirmwareConfig()
+    py, nat, ref = _command_pair(model64, cfg, 3, [0, 11, 30])
+    rows = _random_rows(3, 2)
+    py.robot_params, nat.robot_params = rows, rows.clone()
+    target = py.theta + 0.6 * torch.randn(3, NJ, dtype=torch.float64, device=DEVICE)
+    for it in range(4):
+        a, b = ref.policy_step(target), nat.policy_step(target)
+        same_state(py, nat, 1e-8, f"command path with rows, step {it}")
+        _same_command_state(ref, nat, a, b, 1e-8, "command path with rows")

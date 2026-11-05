@@ -26,6 +26,7 @@ struct StepIO {
     const T* jtau;   // NJ test torque port, null = none
     const T* fext;   // 3 world-frame force on the trunk origin (e.g. a get-up assist), null = none
     const T* fgen;   // NV generalised force (e.g. J^T f of a push on any body point), null = none
+    const T* rp;     // NRP this robot's parameter row (config.hpp RP_*), null = the ModelData values
     // motor driver; active when target != null (set per plant step by the command path in launch.hpp)
     const T* target;    // NJ the target the driver holds this step (already filtered and delayed)
     const T* kp;        // NJ
@@ -58,11 +59,29 @@ struct Work {
     T delta[MAX_CONTACTS];  // penetration -z
     uint8_t cand[MAX_CONTACTS], normal[MAX_CONTACTS], stick[MAX_CONTACTS];
     T fslip[MAX_CONTACTS][2];
+    // this robot's effective parameters (ModelData, changed by its parameter row): set by effective_params
+    T k_n, c_n, k_t, c_t, mu;
+    T damping[NJ], tau_max[NJ];
 };
 
-template <class T> PH_HD T gyrator_scale(const ModelData<T>& m, int k, T i) {
+// ModelData values, changed by the robot's parameter row if it has one (config.hpp RP_*)
+template <class T>
+PH_HD void effective_params(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
+    const T* r = io.rp;
+    w.k_n = r ? m.k_n * r[RP_KN] : m.k_n;
+    w.c_n = r ? m.c_n * r[RP_CN] : m.c_n;
+    w.k_t = r ? m.k_t * r[RP_KT] : m.k_t;
+    w.c_t = r ? m.c_t * r[RP_CT] : m.c_t;
+    w.mu = r ? m.mu * r[RP_MU] : m.mu;
+    for (int k = 0; k < NJ; ++k) {
+        w.damping[k] = r ? m.damping[k] + r[RP_DAMP + k] : m.damping[k];
+        w.tau_max[k] = r ? m.tau_max[k] * r[RP_TAU + k] : m.tau_max[k];
+    }
+}
+
+template <class T> PH_HD T gyrator_scale(const ModelData<T>& m, const Work<T>& w, int k, T i) {
     const T ki = p_abs(m.mk[k] * i);
-    return ki > m.tau_max[k] ? m.tau_max[k] / p_max(ki, T(1e-30)) : T(1);
+    return ki > w.tau_max[k] ? w.tau_max[k] / p_max(ki, T(1e-30)) : T(1);
 }
 
 // The motor driver (firmware.py motor_volts): PD on the target it holds, limited by the motor's torque
@@ -77,10 +96,10 @@ PH_HD void driver_volts(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) 
         T tau = io.kp[k] * (io.target[k] - th[k]) - io.kd[k] * qd;
         const T sgn = tau > T(0) ? T(1) : (tau < T(0) ? T(-1) : T(0));
         const T avail = p_max((m.v_max - m.mk[k] * qd * sgn) * m.mk[k] / m.mR[k], T(0));
-        const T cap = p_min(avail, m.tau_max[k]);
+        const T cap = p_min(avail, w.tau_max[k]);
         tau = p_max(p_min(tau, cap), -cap);
         const T i_star = tau / m.mk[k];
-        const T s = gyrator_scale(m, k, i);
+        const T s = gyrator_scale(m, w, k, i);
         const T v = m.mL[k] * (i_star - i) / m.h + m.mR[k] * i_star + s * m.mk[k] * qd;
         w.v[k] = p_clamp(v, -m.v_max, m.v_max);
     }
@@ -96,7 +115,7 @@ PH_HD void implicit_solve(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w
     for (int d = 0; d < NV; ++d) w.Fc[d] = w.F[d];
 
     if (use_contact) {
-        const T cn_eff = m.c_n + h * m.k_n, ct_eff = m.c_t + h * m.k_t;
+        const T cn_eff = w.c_n + h * w.k_n, ct_eff = w.c_t + h * w.k_t;
         for (int b = 0; b < m.nbody; ++b)
             for (int i = 0; i < 6; ++i) w.H[b][i] = 0;
         for (int c = 0; c < m.ncontact; ++c) {
@@ -121,9 +140,9 @@ PH_HD void implicit_solve(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w
                 }
             }
             // spring force of this mode: f0 = (-k_t xi stick + f_slip, k_n delta normal), as a body wrench
-            T fz = w.normal[c] ? m.k_n * w.delta[c] : T(0);
-            T fx = (w.stick[c] ? -m.k_t * io.xi[2 * c + 0] : T(0)) + w.fslip[c][0];
-            T fy = (w.stick[c] ? -m.k_t * io.xi[2 * c + 1] : T(0)) + w.fslip[c][1];
+            T fz = w.normal[c] ? w.k_n * w.delta[c] : T(0);
+            T fx = (w.stick[c] ? -w.k_t * io.xi[2 * c + 0] : T(0)) + w.fslip[c][0];
+            T fy = (w.stick[c] ? -w.k_t * io.xi[2 * c + 1] : T(0)) + w.fslip[c][1];
             const T fv[3] = {fx, fy, fz};
             T mom[3];
             cross3(w.x[c], fv, mom);
@@ -186,6 +205,7 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
     T* q = io.q;
     T* th = q + 7;
 
+    effective_params(m, io, w);
     // kinematics, M and nu at x_n
     kinematics_and_velocity(m, q, io.p, w);
     for (int k = 0; k < NJ; ++k) w.i_n[k] = io.lam[k] / m.mL[k];
@@ -237,7 +257,7 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
 
     // hinge diagonal: gearbox damping + end stops
     for (int k = 0; k < NJ; ++k) {
-        w.diag[k] = m.damping[k];
+        w.diag[k] = w.damping[k];
         w.stop_on[k] = 0;
         if (m.limits_enabled) {
             const T over = p_max(th[k] - m.stop_high[k], T(0));
@@ -264,11 +284,11 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
         w.fslip[c][1] = 0;
     }
 
-    for (int k = 0; k < NJ; ++k) w.Ks[k] = m.motors_connected ? gyrator_scale(m, k, w.i_n[k]) * m.mk[k] : T(0);
+    for (int k = 0; k < NJ; ++k) w.Ks[k] = m.motors_connected ? gyrator_scale(m, w, k, w.i_n[k]) * m.mk[k] : T(0);
 
     implicit_solve(m, io, w, f0, n, use_contact);
 
-    const T cn_eff = m.c_n + h * m.k_n, ct_eff = m.c_t + h * m.k_t;
+    const T cn_eff = w.c_n + h * w.k_n, ct_eff = w.c_t + h * w.k_t;
     if (use_contact && any_cand) {  // Coulomb cone and unilateral check, one corrected solve if needed
         body_twists(m, w.f, w.nu1, w.V);
         bool changed = false;
@@ -278,15 +298,15 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
             if (w.cand[c]) {
                 T vc[3];
                 point_velocity(w.V[m.contact_body[c]], w.x[c], vc);
-                const T fz = m.k_n * w.delta[c] - cn_eff * vc[2];
-                const T ft0 = -m.k_t * io.xi[2 * c + 0] - ct_eff * vc[0];
-                const T ft1 = -m.k_t * io.xi[2 * c + 1] - ct_eff * vc[1];
+                const T fz = w.k_n * w.delta[c] - cn_eff * vc[2];
+                const T ft0 = -w.k_t * io.xi[2 * c + 0] - ct_eff * vc[0];
+                const T ft1 = -w.k_t * io.xi[2 * c + 1] - ct_eff * vc[1];
                 n2 = fz > T(0);
                 const T fz_c = n2 ? p_max(fz, T(0)) : T(0);
                 const T ftn = p_sqrt(ft0 * ft0 + ft1 * ft1);
-                s2 = n2 && (ftn <= m.mu * fz_c);
+                s2 = n2 && (ftn <= w.mu * fz_c);
                 if (n2 && !s2) {
-                    const T sc = m.mu * fz_c / p_max(ftn, T(1e-12));
+                    const T sc = w.mu * fz_c / p_max(ftn, T(1e-12));
                     fs0 = sc * ft0;
                     fs1 = sc * ft1;
                 }
@@ -310,21 +330,21 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
             T vc[3];
             point_velocity(w.V[m.contact_body[c]], w.x[c], vc);
             const T xo0 = io.xi[2 * c + 0], xo1 = io.xi[2 * c + 1];
-            const T fz = w.normal[c] ? m.k_n * w.delta[c] - cn_eff * vc[2] : T(0);
-            const T fx = (w.stick[c] ? -m.k_t * xo0 - ct_eff * vc[0] : T(0)) + w.fslip[c][0];
-            const T fy = (w.stick[c] ? -m.k_t * xo1 - ct_eff * vc[1] : T(0)) + w.fslip[c][1];
+            const T fz = w.normal[c] ? w.k_n * w.delta[c] - cn_eff * vc[2] : T(0);
+            const T fx = (w.stick[c] ? -w.k_t * xo0 - ct_eff * vc[0] : T(0)) + w.fslip[c][0];
+            const T fy = (w.stick[c] ? -w.k_t * xo1 - ct_eff * vc[1] : T(0)) + w.fslip[c][1];
             const bool slip = w.normal[c] && !w.stick[c];
             T xn0 = w.stick[c] ? xo0 + h * vc[0] : T(0);
             T xn1 = w.stick[c] ? xo1 + h * vc[1] : T(0);
             if (slip) {
-                xn0 = -w.fslip[c][0] / m.k_t;
-                xn1 = -w.fslip[c][1] / m.k_t;
+                xn0 = -w.fslip[c][0] / w.k_t;
+                xn1 = -w.fslip[c][1] / w.k_t;
             }
             work_in += -h * (fx * vc[0] + fy * vc[1] + fz * vc[2]);
             const T d_old = p_max(w.delta[c], T(0));
             const T d_new = p_max(w.delta[c] - h * vc[2], T(0));
-            dVn += T(0.5) * m.k_n * (d_new * d_new - d_old * d_old);
-            dVt += T(0.5) * m.k_t * ((xn0 * xn0 + xn1 * xn1) - (xo0 * xo0 + xo1 * xo1));
+            dVn += T(0.5) * w.k_n * (d_new * d_new - d_old * d_old);
+            dVt += T(0.5) * w.k_t * ((xn0 * xn0 + xn1 * xn1) - (xo0 * xo0 + xo1 * xo1));
             io.xi[2 * c + 0] = xn0;
             io.xi[2 * c + 1] = xn1;
             if (io.out_fc) {
@@ -348,7 +368,7 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
     for (int k = 0; k < NJ; ++k) {
         supplied += w.v[k] * w.i1[k];
         copper += m.mR[k] * w.i1[k] * w.i1[k];
-        gearbox += m.damping[k] * thd1[k] * thd1[k];
+        gearbox += w.damping[k] * thd1[k] * thd1[k];
         if (m.limits_enabled && w.stop_on[k]) stops += (m.lim_c + h * m.lim_k) * thd1[k] * thd1[k];
         if (io.jtau) mech += io.jtau[k] * thd1[k];
     }

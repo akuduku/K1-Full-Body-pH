@@ -189,6 +189,7 @@ plant.ph_matrices()                   # explicit J, D, G, ∇H for robot 0
 | `ph_k1/contact.py` | Contact and end-stop parameters |
 | `ph_k1/plant.py` | **`K1PHPlant`**: state, `step(volts)`, `energy()`, energy ledger, `ph_matrices()` |
 | `ph_k1/drive.py` | Classical servo of the physics checks: target angles → volts (not the robot's path) |
+| `ph_k1/robot_params.py` | Per-robot parameter rows `plant.robot_params` (B, 49): factors on the contact constants, added joint damping, factors on the torque ceilings; for domain randomisation and system identification (`../Model Based RL`) |
 | `ph_k1/firmware.py` | **The robot's command path** (K1_Deploy firmware): filter, delay line, motor driver, IMU; Python reference |
 | `ph_k1/native.py` | **`K1PHPlantNative`**: the plant + command path in C++/CUDA (`ph_k1_cuda/`), `policy_step(targets)` |
 | `ph_k1/video.py` | Headless MP4 of the plant (MuJoCo only draws) for W&B |
@@ -204,7 +205,10 @@ plant.ph_matrices()                   # explicit J, D, G, ∇H for robot 0
 | `kaggle/`, `colab/` | GPU runs that clone this repo: the benchmark (`kaggle/run.sh`, Colab notebook), the stand training (`TASK=stand kaggle/run.sh`), the get-up training (`colab/k1-getup.yaml` for colab-train) |
 | `docs/` | Figures and notes |
 
-The plant is batched: N robots step in parallel. PyTorch on the laptop CPU: about 5 ms per step
+The plant is batched: N robots step in parallel. Each robot can have its own physical parameters
+(`plant.robot_params`, `ph_k1/robot_params.py`: contact `k_n, c_n, k_t, c_t, μ` factors, added joint damping,
+torque-ceiling factors; the driver gains and the delay are per robot already). Without rows the plant uses
+the shared constants bit for bit. PyTorch on the laptop CPU: about 5 ms per step
 for one robot, ~200 policy steps/s at best. The C++ plant (`K1PHPlantNative`, same numbers to
 round-off): ~30 µs per step for one robot, ~8–9 thousand policy steps/s on the same CPU.
 

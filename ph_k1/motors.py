@@ -70,10 +70,12 @@ class MotorBank:
     v_max: float
     types: list[str]
 
-    def gyrator_scale(self, i: torch.Tensor) -> torch.Tensor:
-        """s in (0,1]: torque ceiling that keeps tau.theta_dot = e.i exact."""
+    def gyrator_scale(self, i: torch.Tensor, tau_max: torch.Tensor | None = None) -> torch.Tensor:
+        """s in (0,1]: torque ceiling that keeps tau.theta_dot = e.i exact.  tau_max: per-robot ceilings (B,22)
+        (robot_params), default the bank's own."""
+        cap = self.tau_max if tau_max is None else tau_max
         ki = (self.k * i).abs()
-        return torch.where(ki > self.tau_max, self.tau_max / ki.clamp_min(1e-300), torch.ones_like(ki))
+        return torch.where(ki > cap, cap / ki.clamp_min(1e-300), torch.ones_like(ki))
 
     def torque(self, i: torch.Tensor) -> torch.Tensor:
         return self.gyrator_scale(i) * self.k * i

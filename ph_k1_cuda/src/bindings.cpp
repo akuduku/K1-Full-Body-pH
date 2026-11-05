@@ -167,7 +167,8 @@ void run_t(const torch::Tensor& model, const torch::Tensor& q, const torch::Tens
            const c10::optional<torch::Tensor>& out_slip, const c10::optional<torch::Tensor>& out_gyro,
            const c10::optional<torch::Tensor>& out_acc, const c10::optional<torch::Tensor>& out_target,
            const c10::optional<torch::Tensor>& ring_kp, const c10::optional<torch::Tensor>& ring_kd,
-           const c10::optional<torch::Tensor>& trunk_force, const c10::optional<torch::Tensor>& gen_force) {
+           const c10::optional<torch::Tensor>& trunk_force, const c10::optional<torch::Tensor>& gen_force,
+           const c10::optional<torch::Tensor>& robot_params) {
     TORCH_CHECK(model.scalar_type() == torch::kUInt8 && model.numel() == static_cast<int64_t>(sizeof(ph::ModelData<T>)),
                 "model block was packed for the other float type (or is corrupt)");
     TORCH_CHECK(model.device() == q.device(), "model block is on ", model.device(), ", the state on ", q.device());
@@ -207,6 +208,7 @@ void run_t(const torch::Tensor& model, const torch::Tensor& q, const torch::Tens
     }
     b.force = rows<T>(trunk_force, q, B, 3, "trunk_force");
     b.gen_force = rows<T>(gen_force, q, B, ph::NV, "gen_force");
+    b.robot_params = rows<T>(robot_params, q, B, ph::NRP, "robot_params");
     b.out_nu = rows<T>(out_nu, q, B, ph::NV, "out_nu");
     b.out_i = rows<T>(out_i, q, B, ph::NJ, "out_i");
     b.out_tau = rows<T>(out_tau, q, B, ph::NJ, "out_tau");
@@ -244,16 +246,17 @@ void run(const torch::Tensor& model, const torch::Tensor& q, const torch::Tensor
          const c10::optional<torch::Tensor>& out_slip, const c10::optional<torch::Tensor>& out_gyro,
          const c10::optional<torch::Tensor>& out_acc, const c10::optional<torch::Tensor>& out_target,
            const c10::optional<torch::Tensor>& ring_kp, const c10::optional<torch::Tensor>& ring_kd,
-           const c10::optional<torch::Tensor>& trunk_force, const c10::optional<torch::Tensor>& gen_force) {
+           const c10::optional<torch::Tensor>& trunk_force, const c10::optional<torch::Tensor>& gen_force,
+           const c10::optional<torch::Tensor>& robot_params) {
     TORCH_CHECK(nsub >= 1, "nsub must be >= 1");
     if (q.scalar_type() == torch::kFloat64) {
         run_t<double>(model, q, p, xi, lam, ledger, volts, jtau, target, last_target, ring, ring_idx, lag, push, kp, kd, nsub,
                       out_nu, out_i, out_tau, out_v, out_fc, out_active, out_slip, out_gyro, out_acc, out_target,
-                      ring_kp, ring_kd, trunk_force, gen_force);
+                      ring_kp, ring_kd, trunk_force, gen_force, robot_params);
     } else if (q.scalar_type() == torch::kFloat32) {
         run_t<float>(model, q, p, xi, lam, ledger, volts, jtau, target, last_target, ring, ring_idx, lag, push, kp, kd, nsub,
                      out_nu, out_i, out_tau, out_v, out_fc, out_active, out_slip, out_gyro, out_acc, out_target,
-                      ring_kp, ring_kd, trunk_force, gen_force);
+                      ring_kp, ring_kd, trunk_force, gen_force, robot_params);
     } else {
         TORCH_CHECK(false, "state must be float32 or float64");
     }
@@ -276,11 +279,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
             py::arg("out_v") = py::none(), py::arg("out_fc") = py::none(), py::arg("out_active") = py::none(),
             py::arg("out_slip") = py::none(), py::arg("out_gyro") = py::none(), py::arg("out_acc") = py::none(),
             py::arg("out_target") = py::none(), py::arg("ring_kp") = py::none(), py::arg("ring_kd") = py::none(),
-            py::arg("trunk_force") = py::none(), py::arg("gen_force") = py::none());
+            py::arg("trunk_force") = py::none(), py::arg("gen_force") = py::none(),
+            py::arg("robot_params") = py::none());
     mod.attr("NQ") = ph::NQ;
     mod.attr("NV") = ph::NV;
     mod.attr("NJ") = ph::NJ;
     mod.attr("LEDGER") = ph::LEDGER;
+    mod.attr("NRP") = ph::NRP;
 #ifdef PH_K1_WITH_CUDA
     mod.attr("WITH_CUDA") = true;
 #else

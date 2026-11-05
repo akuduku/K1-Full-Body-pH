@@ -42,6 +42,8 @@ struct BatchT {
     const T* force = nullptr;
     // both modes: B x NV generalised force during every plant step (or null)
     const T* gen_force = nullptr;
+    // both modes: B x NRP per-robot parameter rows (config.hpp RP_*), or null = the ModelData values
+    const T* robot_params = nullptr;
     // outputs
     T* out_nu = nullptr;
     T* out_i = nullptr;
@@ -70,6 +72,7 @@ PH_HD StepIO<T> make_io(const BatchT<T>& b, int r, int nc) {
     io.kd = b.kd ? b.kd + r * NJ : nullptr;
     io.fext = b.force ? b.force + r * 3 : nullptr;
     io.fgen = b.gen_force ? b.gen_force + r * NV : nullptr;
+    io.rp = b.robot_params ? b.robot_params + r * NRP : nullptr;
     io.out_nu = b.out_nu ? b.out_nu + r * NV : nullptr;
     io.out_i = b.out_i ? b.out_i + r * NJ : nullptr;
     io.out_tau = b.out_tau ? b.out_tau + r * NJ : nullptr;

@@ -20,6 +20,14 @@ constexpr int MAX_BODIES = 32;    // the K1 has 25
 constexpr int MAX_CONTACTS = 192; // the K1 has 128 (8 sole points + 8 box corners per other body)
 constexpr int LEDGER = 6;         // supplied, mech_input, copper, gearbox, stops, contact  (plant.py Ledger)
 
+// Per-robot physical parameters (ph_k1/robot_params.py is the reference): one row of NRP numbers per robot, on top
+// of the shared ModelData.  Contact entries scale k_n, c_n, k_t, c_t, mu; RP_DAMP adds passive joint damping
+// [N m s/rad]; RP_TAU scales the motor torque ceiling.  No row (null) = the ModelData values exactly.
+constexpr int RP_KN = 0, RP_CN = 1, RP_KT = 2, RP_CT = 3, RP_MU = 4;
+constexpr int RP_DAMP = 5;            // NJ entries, added
+constexpr int RP_TAU = RP_DAMP + NJ;  // NJ entries, factors
+constexpr int NRP = RP_TAU + NJ;      // 49
+
 // float/double overloads that exist on the host (C library) and on the device (CUDA math)
 PH_HD float p_sqrt(float x) { return sqrtf(x); }
 PH_HD double p_sqrt(double x) { return sqrt(x); }

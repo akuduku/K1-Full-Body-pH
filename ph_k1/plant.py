@@ -59,6 +59,7 @@ from .dynamics import (
 )
 from .model import HOME_POSE, NB, NJ, NQ, NV, K1Model, load_k1
 from .motors import MotorBank, build_motors
+from .robot_params import Effective, effective
 from .spatial import quat_exp, quat_mul, quat_rate_matrix
 
 TIMESTEP = 1e-3
@@ -119,6 +120,8 @@ class K1PHPlant:
         self.motors = motors or build_motors(m)
         self.gravity = gravity
         self.dtype, self.device = m.dtype, m.device
+        # per-robot parameter rows (B, robot_params.NRP) on top of contact/motors, or None (ph_k1/robot_params.py)
+        self.robot_params: torch.Tensor | None = None
         # free dofs and where the hinges sit inside them
         self.free = torch.arange(NB if fixed_base else 0, NV, device=self.device)
         self.jrows = torch.arange(NJ, device=self.device) + (0 if fixed_base else NB)
@@ -191,6 +194,10 @@ class K1PHPlant:
     def theta(self):
         return self.q[:, 7:]
 
+    def params(self) -> Effective:
+        """The contact/motor parameters a step uses: the shared ones, changed per robot by robot_params."""
+        return effective(self.contact, self.motors, self.robot_params)
+
     @property
     def current(self):
         return self.lam / self.motors.L
@@ -201,12 +208,14 @@ class K1PHPlant:
         kin = kin or self.kinematics()
         nu = self.velocity(kin)
         c, lim, m = self.contact, self.limits, self.model
+        e = self.params()
         out = {"kinetic": 0.5 * (self.p * nu).sum(-1)}
         zeros_b = torch.zeros(self.B, dtype=self.dtype, device=self.device)
         out["gravity"] = gravity_potential(m, kin) if self.gravity else zeros_b
         if c.enabled and not self.fixed_base:
             delta = (-self._sole_points(kin)[..., 2]).clamp_min(0)
-            out["contact"] = 0.5 * c.k_n * (delta**2).sum(-1) + 0.5 * c.k_t * (self.xi**2).sum((-1, -2))
+            out["contact"] = (0.5 * _per_robot(e.k_n) * (delta**2).sum(-1)
+                              + 0.5 * _per_robot(e.k_t) * (self.xi**2).sum((-1, -2)))
         else:
             out["contact"] = zeros_b
         if lim.enabled:
@@ -232,6 +241,9 @@ class K1PHPlant:
         """
         m, h, B = self.model, self.h, self.B
         mot, c, lim = self.motors, self.contact, self.limits
+        e = self.params()  # contact constants (B,1) and damping/tau_max (B,22) when robot_params is set
+        k_n, c_n, k_t, c_t, mu = e.k_n, e.c_n, e.k_t, e.c_t, e.mu
+        k_t3 = _per_robot(k_t, 3)  # against (B, nc, 2)
         zeros22 = torch.zeros(B, NJ, dtype=self.dtype, device=self.device)
         v = zeros22 if volts is None else torch.as_tensor(volts, dtype=self.dtype, device=self.device).expand(B, NJ)
 
@@ -261,7 +273,7 @@ class K1PHPlant:
             F += fgen
 
         # implicit diagonal on the hinge rows: gearbox + end-stop
-        diag = mot.damping.expand(B, NJ).clone()
+        diag = e.damping.expand(B, NJ).clone()
         if lim.enabled:
             over = (theta - m.stop_high).clamp_min(0)
             under = (m.stop_low - theta).clamp_min(0)
@@ -283,11 +295,12 @@ class K1PHPlant:
             cand = delta > 0
             Jc = point_jacobian(kin, m.contact_body, pc)  # (B,nc,3,28)
             Jz, Jt = Jc[:, :, 2], Jc[:, :, :2]
-            cn_eff, ct_eff = c.c_n + h * c.k_n, c.c_t + h * c.k_t
+            cn_eff, ct_eff = c_n + h * k_n, c_t + h * k_t
+            ct_eff3 = _per_robot(ct_eff, 3)
         else:
             cand = torch.zeros(B, nc, dtype=torch.bool, device=self.device)
 
-        Ks = mot.gyrator_scale(i_n) * mot.k if self.motors_connected else zeros22
+        Ks = mot.gyrator_scale(i_n, e.tau_max) * mot.k if self.motors_connected else zeros22
 
         def solve(normal_on, stick_on, f_slip):
             A, Ftot = A0, F
@@ -299,8 +312,8 @@ class K1PHPlant:
                     + torch.einsum("bc,bcid,bcie->bde", wt, Jt, Jt)
                 )
                 f0 = torch.zeros(B, nc, 3, dtype=self.dtype, device=self.device)
-                f0[..., 2] = c.k_n * delta * normal_on
-                f0[..., :2] = -c.k_t * self.xi * stick_on[..., None] + f_slip
+                f0[..., 2] = k_n * delta * normal_on
+                f0[..., :2] = -k_t3 * self.xi * stick_on[..., None] + f_slip
                 Ftot = F + torch.einsum("bcid,bci->bd", Jc, f0)
             f = self.free
             Af = A[:, f][:, :, f]
@@ -326,14 +339,14 @@ class K1PHPlant:
         nu1, i1, A = solve(normal_on, stick_on, f_slip)
         if use_contact and bool(cand.any()):
             vc1 = torch.einsum("bcid,bd->bci", Jc, nu1)
-            fz = c.k_n * delta - cn_eff * vc1[..., 2]
-            ft = -c.k_t * self.xi - ct_eff * vc1[..., :2]
+            fz = k_n * delta - cn_eff * vc1[..., 2]
+            ft = -k_t3 * self.xi - ct_eff3 * vc1[..., :2]
             normal2 = cand & (fz > 0)
             fz_c = fz.clamp_min(0) * normal2
             ftn = torch.linalg.norm(ft, dim=-1)
-            stick2 = normal2 & (ftn <= c.mu * fz_c)
+            stick2 = normal2 & (ftn <= mu * fz_c)
             slip2 = normal2 & ~stick2
-            f_slip2 = (c.mu * fz_c / ftn.clamp_min(1e-12))[..., None] * ft * slip2[..., None]
+            f_slip2 = (mu * fz_c / ftn.clamp_min(1e-12))[..., None] * ft * slip2[..., None]
             if not (torch.equal(normal2, normal_on) and torch.equal(stick2, stick_on)):
                 normal_on, stick_on, f_slip = normal2, stick2, f_slip2
                 nu1, i1, A = solve(normal_on, stick_on, f_slip)
@@ -345,16 +358,16 @@ class K1PHPlant:
         xi_old = self.xi
         if use_contact:
             vc1 = torch.einsum("bcid,bd->bci", Jc, nu1)
-            f_contact[..., 2] = (c.k_n * delta - cn_eff * vc1[..., 2]) * normal_on
-            f_contact[..., :2] = (-c.k_t * xi_old - ct_eff * vc1[..., :2]) * stick_on[..., None] + f_slip
+            f_contact[..., 2] = (k_n * delta - cn_eff * vc1[..., 2]) * normal_on
+            f_contact[..., :2] = (-k_t3 * xi_old - ct_eff3 * vc1[..., :2]) * stick_on[..., None] + f_slip
             xi_new = torch.where(stick_on[..., None], xi_old + h * vc1[..., :2], torch.zeros_like(xi_old))
-            xi_new = torch.where(slip_mask(normal_on, stick_on)[..., None], -f_slip / c.k_t, xi_new)
+            xi_new = torch.where(slip_mask(normal_on, stick_on)[..., None], -f_slip / k_t3, xi_new)
             # losses = work the body does on the contact elements minus what
             # they stored (dampers, slip, bristle released on lift-off)
             work_in = -h * (f_contact * vc1).sum((-1, -2))
             d_new = (delta - h * vc1[..., 2]).clamp_min(0)
-            dV_n = 0.5 * c.k_n * (d_new**2 - delta.clamp_min(0) ** 2).sum(-1)
-            dV_t = 0.5 * c.k_t * ((xi_new**2).sum((-1, -2)) - (xi_old**2).sum((-1, -2)))
+            dV_n = 0.5 * _per_robot(k_n) * (d_new**2 - delta.clamp_min(0) ** 2).sum(-1)
+            dV_t = 0.5 * _per_robot(k_t) * ((xi_new**2).sum((-1, -2)) - (xi_old**2).sum((-1, -2)))
             diss_contact = work_in - dV_n - dV_t
             self.xi = xi_new
 
@@ -362,7 +375,7 @@ class K1PHPlant:
         led = self.ledger
         led.supplied += h * (v * i1).sum(-1)
         led.copper += h * (mot.R * i1 * i1).sum(-1)
-        led.gearbox += h * (mot.damping * thd1 * thd1).sum(-1)
+        led.gearbox += h * (e.damping * thd1 * thd1).sum(-1)
         if lim.enabled:
             led.stops += h * (stop_on * (lim.c + h * lim.k) * thd1 * thd1).sum(-1)
         led.contact += diss_contact
@@ -400,7 +413,10 @@ class K1PHPlant:
         Valid in the smooth regime (contact points sticking, no cone/clip
         events).  dH/dx comes from autograd of H(x), not from the dynamics,
         so comparing (J - D) dH/dx + G v with `rhs_direct` is a real test.
+        Uses the shared parameters only (not robot_params).
         """
+        if self.robot_params is not None:
+            raise ValueError("ph_matrices uses the shared contact/motor parameters; set robot_params = None first")
         m, mot, c, lim = self.model, self.motors, self.contact, self.limits
         dt, dev = self.dtype, self.device
         q0, p0, xi0, lam0 = self.q[b : b + 1], self.p[b : b + 1], self.xi[b : b + 1], self.lam[b : b + 1]
@@ -512,6 +528,13 @@ class K1PHPlant:
         rhs_direct = torch.cat((qdot, Fp[fr], xi_dot, lam_dot))
         return {"x_grad": grad, "J": J, "D": D, "G": G, "rhs": rhs, "rhs_direct": rhs_direct,
                 "y": G.T @ grad, "H": Hval.detach()}
+
+
+def _per_robot(v, ndim: int = 1):
+    """A per-robot (B,1) parameter as (B,) (ndim 1) or (B,1,1) (ndim 3); a shared float stays a float."""
+    if not isinstance(v, torch.Tensor):
+        return v
+    return v.reshape(-1, *([1] * (ndim - 1)))
 
 
 def slip_mask(normal_on: torch.Tensor, stick_on: torch.Tensor) -> torch.Tensor:
