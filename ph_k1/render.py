@@ -33,6 +33,16 @@ class Viewer:
         mujoco.mj_kinematics(self.plant.model.mj, self.data)
         self.handle.sync()
 
+    def wait_until_closed(self) -> None:
+        """Keep showing the last pose until the window is closed."""
+        import time
+
+        if self.is_running():
+            print("simulation finished - close the viewer window to exit")
+        while self.is_running():
+            self.sync()
+            time.sleep(1 / 30)
+
     def close(self) -> None:
         self.handle.close()
 

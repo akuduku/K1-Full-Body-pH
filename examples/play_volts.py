@@ -112,6 +112,7 @@ def main() -> None:
           f"supplied={last['supplied']:.2f} J dissipated={last['dissipated']:.2f} J residual={last['residual']:+.3f} J")
     print(f"wrote {out / (args.scenario + '.png')} and .csv")
     if viewer is not None:
+        viewer.wait_until_closed()
         viewer.close()
 
 

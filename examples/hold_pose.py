@@ -82,6 +82,7 @@ def main() -> None:
           f"{time.time() - wall:.0f} s wall")
     print(f"wrote {out / (tag + '.png')} and .csv")
     if viewer is not None:
+        viewer.wait_until_closed()
         viewer.close()
 
 
