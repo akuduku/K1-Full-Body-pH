@@ -107,6 +107,13 @@ Each foot has 4 sole points, the corners of the MJCF collision box. Every other 
 with collision geometry gets the 8 corners of its bounding box, so a fallen robot
 lies on the floor instead of sinking through it.
 
+### Self-contact
+
+Off by default. Every body with collision geometry gets a chain of spheres; two overlapping spheres of bodies more
+than 2 joints apart carry a spring `½ k δ²` (a tank in H, reported in the `contact` tank) and a damper (in D). The
+force is internal (equal and opposite on the two bodies), pushes only, and is solved implicitly with the rest of
+`(ν, i)`.
+
 ### Motors
 
 Each hinge has the equivalent DC motor whose full-voltage torque–speed line passes
@@ -187,6 +194,7 @@ plant.ph_matrices()                   # explicit J, D, G, ∇H for robot 0
 | `ph_k1/dynamics.py` | Forward kinematics, `M(q)`, analytic `∂T/∂θ`, gyroscopic block, gravity |
 | `ph_k1/motors.py` | 22 DC motors from the datasheet torque–speed curves |
 | `ph_k1/contact.py` | Contact and end-stop parameters |
+| `ph_k1/self_contact.py` | Self-collision: spheres on the bodies, pair elements (off by default) |
 | `ph_k1/plant.py` | **`K1PHPlant`**: state, `step(volts)`, `energy()`, energy ledger, `ph_matrices()` |
 | `ph_k1/drive.py` | Classical servo of the physics checks: target angles → volts (not the robot's path) |
 | `ph_k1/robot_params.py` | Per-robot parameter rows `plant.robot_params` (B, 49): factors on the contact constants, added joint damping, factors on the torque ceilings; for domain randomisation and system identification (`../Model Based RL`) |
@@ -247,7 +255,9 @@ round-off): ~30 µs per step for one robot, ~8–9 thousand policy steps/s on th
   Booster.
 - **Contact numbers:** `k_n = 3e4` N/m per point (about 0.8 mm sink), `μ = 0.7`. They
   are not identified on the real robot.
-- **No self-collision.** Only body–ground contact and end stops are modelled.
+- **Self-collision is simplified and off by default.** `SelfContactParams(enabled=True)` (`ph_k1/self_contact.py`, on in
+  `rl/getup`) puts spheres on the bodies and a unilateral spring + damper on every overlapping pair of non-neighbours,
+  integrated implicitly like the ground. No friction between limbs, and the spheres only approximate the parts.
 - **End stops wider than the MJCF range.** The MJCF range is the firmware's command clamp
   (K1_Deploy `k1_config.h` has the same numbers). The real K1 went past it in its get-ups (head
   yaw +0.34 rad, elbow yaw ±0.2, ankle roll +0.16, hip roll ±0.1; the logs `getup_2236.csv`, `getup_front_2250.csv`),

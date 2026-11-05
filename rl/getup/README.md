@@ -65,7 +65,7 @@ Default capacity 150 J; `--no-tank` is the ablation.
 | end_stops | −0.1 /W | power dissipated in the end stops |
 | voltage_margin | −1 | `|R τ / k + k q̇| / V > 0.8`: the motor far out on its torque-speed line |
 | torque_margin, soft_joint_limits, target_beyond_limits | −2, −2, −0.5 | as RL_Core |
-| self_proximity | −2 | the plant has no self-collision: the get-up example's 10 limb pairs, closer than 9 cm |
+| self_proximity | −2 | the get-up example's 10 limb pairs, closer than 9 cm (a soft margin; the plant's self-contact elements stop the limbs) |
 | action_rate, joint_acc | −0.01, −2.5e-7 | smoothness (the rate covers the gains × the gain curriculum) |
 | head_contact, head_impact, neck_torque | −1, −2, −2 × curriculum | as RL_Core |
 

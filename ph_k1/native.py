@@ -36,6 +36,7 @@ from . import firmware as fw
 from .dynamics import GRAVITY
 from .model import NJ, NV
 from .plant import K1PHPlant, Ledger, StepInfo
+from .self_contact import build_geometry
 
 NATIVE_DIR = Path(__file__).resolve().parents[1] / "ph_k1_cuda"
 _LEDGER_FIELDS = [f.name for f in dataclasses.fields(Ledger)]  # supplied, mech_input, copper, gearbox, stops, contact
@@ -140,7 +141,8 @@ class K1PHPlantNative(K1PHPlant):
         mot, cfg = self.motors, self.firmware
         key = (
             id(self.model), self.h, self.fixed_base, self.motors_connected, self.gravity, self.dtype, self.device,
-            dataclasses.astuple(self.contact), dataclasses.astuple(self.limits), mot.v_max,
+            dataclasses.astuple(self.contact), dataclasses.astuple(self.limits), dataclasses.astuple(self.self_contact),
+            mot.v_max,
             tuple((id(t), t._version) for t in (mot.k, mot.R, mot.L, mot.tau_max, mot.damping)),
             cfg.pos_clamp, cfg.slew, cfg.target_clamp, cfg.overspeed_guard, cfg.policy_dt, fw.effort_limit(cfg),
         )
@@ -158,12 +160,17 @@ class K1PHPlantNative(K1PHPlant):
                 "motor_damping": T(mot.damping), "fw_effort": T(fw.effort_limit(cfg)),
                 "fw_max_joint_velocity": T(fw.MAX_JOINT_VELOCITY), "fw_max_target_velocity": T(fw.MAX_TARGET_VELOCITY),
             }
-            c, lim = self.contact, self.limits
+            c, lim, sc = self.contact, self.limits, self.self_contact
+            g = build_geometry(m)
+            tensors.update(sphere_body=T(g.body), sphere_pos=T(g.pos), sphere_r=T(g.radius), pair_a=T(g.pair_a),
+                           pair_b=T(g.pair_b))
             scalars = {"h": self.h, "lim_k": lim.k, "lim_c": lim.c, "k_n": c.k_n, "c_n": c.c_n, "k_t": c.k_t,
-                       "c_t": c.c_t, "mu": c.mu, "v_max": float(mot.v_max), "policy_dt": cfg.policy_dt}
+                       "c_t": c.c_t, "mu": c.mu, "v_max": float(mot.v_max), "policy_dt": cfg.policy_dt,
+                       "self_k": sc.k, "self_c": sc.c}
             ints = {"nbody": m.nbody, "ncontact": m.ncontact, "fixed_base": int(self.fixed_base),
                     "motors_connected": int(self.motors_connected), "gravity": int(self.gravity),
                     "contact_enabled": int(c.enabled), "limits_enabled": int(lim.enabled),
+                    "self_enabled": int(sc.enabled), "nsphere": g.nsphere, "npair": g.npair,
                     "fw_pos_clamp": int(cfg.pos_clamp), "fw_slew": int(cfg.slew),
                     "fw_target_clamp": int(cfg.target_clamp), "fw_overspeed": int(cfg.overspeed_guard)}
             block = self._native.pack_model(tensors, scalars, ints, self.dtype == torch.float64)

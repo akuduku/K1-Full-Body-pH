@@ -17,6 +17,9 @@ struct ModelData {
     int gravity;
     int contact_enabled;
     int limits_enabled;
+    int self_enabled;      // self-contact elements on
+    int nsphere;
+    int npair;
 
     T h;     // plant time step [s]
     T g[3];  // gravity vector [m/s^2]
@@ -49,6 +52,14 @@ struct ModelData {
     int contact_body[MAX_CONTACTS];
     T contact_local[MAX_CONTACTS][3];
     T k_n, c_n, k_t, c_t, mu;
+
+    // self-contact (ph_k1/self_contact.py): spheres fixed to bodies, unilateral spring + damper per sphere pair
+    int sphere_body[MAX_SPHERES];
+    T sphere_pos[MAX_SPHERES][3];
+    T sphere_r[MAX_SPHERES];
+    int pair_a[MAX_SELF_PAIRS];
+    int pair_b[MAX_SELF_PAIRS];
+    T self_k, self_c;
 
     // 22 DC motors: L di/dt = v - R i - s k qdot, tau = s k i
     T mk[NJ], mR[NJ], mL[NJ], tau_max[NJ], damping[NJ];

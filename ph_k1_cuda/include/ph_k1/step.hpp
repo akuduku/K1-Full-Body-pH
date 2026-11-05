@@ -59,6 +59,11 @@ struct Work {
     T delta[MAX_CONTACTS];  // penetration -z
     uint8_t cand[MAX_CONTACTS], normal[MAX_CONTACTS], stick[MAX_CONTACTS];
     T fslip[MAX_CONTACTS][2];
+    // self-contact: sphere centres at x_n, and the overlapping pairs of this step for the ledger
+    T sx[MAX_SPHERES][3];
+    int self_pair[MAX_SELF_ACTIVE];
+    uint8_t self_on[MAX_SELF_ACTIVE];
+    int nself;
     // this robot's effective parameters (ModelData, changed by its parameter row): set by effective_params
     T k_n, c_n, k_t, c_t, mu;
     T damping[NJ], tau_max[NJ];
@@ -105,6 +110,69 @@ PH_HD void driver_volts(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) 
     }
 }
 
+// Self-contact (ph_k1/self_contact.py).  The sphere centres at x_n -> w.sx
+template <class T>
+PH_HD void self_spheres(const ModelData<T>& m, Work<T>& w) {
+    for (int s = 0; s < m.nsphere; ++s) {
+        const int b = m.sphere_body[s];
+        mv3(w.f.R[b], m.sphere_pos[s], w.sx[s]);
+        for (int i = 0; i < 3; ++i) w.sx[s][i] += w.f.P[b][i];
+    }
+}
+
+// pair p: false if apart, else its overlap, the normal (b -> a) and the force point (the middle of the overlap)
+template <class T>
+PH_HD bool self_pair(const ModelData<T>& m, const Work<T>& w, int p, T& delta, T* n, T* x) {
+    const int a = m.pair_a[p], b = m.pair_b[p];
+    const T dv[3] = {w.sx[a][0] - w.sx[b][0], w.sx[a][1] - w.sx[b][1], w.sx[a][2] - w.sx[b][2]};
+    const T rr = m.sphere_r[a] + m.sphere_r[b];
+    const T d2 = dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2];
+    if (d2 >= rr * rr) return false;
+    const T d = p_sqrt(d2);
+    delta = rr - d;
+    const T id = T(1) / p_max(d, T(1e-9));
+    const T rb = m.sphere_r[b] - T(0.5) * delta;
+    for (int i = 0; i < 3; ++i) {
+        n[i] = dv[i] * id;
+        x[i] = w.sx[b][i] + n[i] * rb;
+    }
+    return true;
+}
+
+// n . (v_a - v_b) at the force point of pair p, with the body twists in w.V
+template <class T>
+PH_HD T self_normal_speed(const ModelData<T>& m, const Work<T>& w, int p, const T* n, const T* x) {
+    T va[3], vb[3];
+    point_velocity(w.V[m.sphere_body[m.pair_a[p]]], x, va);
+    point_velocity(w.V[m.sphere_body[m.pair_b[p]]], x, vb);
+    return (va[0] - vb[0]) * n[0] + (va[1] - vb[1]) * n[1] + (va[2] - vb[2]) * n[2];
+}
+
+// the overlapping pairs of this step -> w.self_pair, all on
+template <class T>
+PH_HD void self_collect(const ModelData<T>& m, Work<T>& w) {
+    w.nself = 0;
+    for (int p = 0; p < m.npair && w.nself < MAX_SELF_ACTIVE; ++p) {
+        T delta, n[3], x[3];
+        if (!self_pair(m, w, p, delta, n, x)) continue;
+        w.self_pair[w.nself] = p;
+        w.self_on[w.nself] = 1;
+        ++w.nself;
+    }
+}
+
+// row[NV] = n . (J_a - J_b) of pair p at its force point
+template <class T>
+PH_HD void self_row(const ModelData<T>& m, const Work<T>& w, int p, const T* n, const T* x, T* row) {
+    for (int d = 0; d < NV; ++d) row[d] = 0;
+    int idx[NV];
+    T col[NV][3];
+    int nz = point_jacobian(m, w.f, m.sphere_body[m.pair_a[p]], x, idx, col);
+    for (int s = 0; s < nz; ++s) row[idx[s]] += n[0] * col[s][0] + n[1] * col[s][1] + n[2] * col[s][2];
+    nz = point_jacobian(m, w.f, m.sphere_body[m.pair_b[p]], x, idx, col);
+    for (int s = 0; s < nz; ++s) row[idx[s]] -= n[0] * col[s][0] + n[1] * col[s][1] + n[2] * col[s][2];
+}
+
 // The implicit solve for the given contact modes -> w.nu1, w.i1   (plant.py step.solve)
 template <class T>
 PH_HD void implicit_solve(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w, int f0, int n, bool use_contact) {
@@ -113,6 +181,23 @@ PH_HD void implicit_solve(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w
         for (int b = 0; b < n; ++b) w.A[a * NV + b] = w.M[(a + f0) * NV + (b + f0)];
     for (int k = 0; k < NJ; ++k) w.A[(NB + k - f0) * NV + (NB + k - f0)] += h * w.diag[k];
     for (int d = 0; d < NV; ++d) w.Fc[d] = w.F[d];
+
+    if (m.self_enabled) {  // limbs against limbs: spring at x_n, h (c + h k) J^T J in the momentum block
+        const T cs_eff = m.self_c + h * m.self_k;
+        for (int i = 0; i < w.nself; ++i) {
+            if (!w.self_on[i]) continue;
+            T delta = 0, nv[3], x[3], row[NV];
+            self_pair(m, w, w.self_pair[i], delta, nv, x);
+            self_row(m, w, w.self_pair[i], nv, x, row);
+            const T fs = m.self_k * delta;
+            for (int d = 0; d < NV; ++d) w.Fc[d] += fs * row[d];
+            for (int a = 0; a < n; ++a) {
+                const T ga = h * cs_eff * row[a + f0];
+                if (ga == T(0)) continue;
+                for (int b = 0; b < n; ++b) w.A[a * NV + b] += ga * row[b + f0];
+            }
+        }
+    }
 
     if (use_contact) {
         const T cn_eff = w.c_n + h * w.k_n, ct_eff = w.c_t + h * w.k_t;
@@ -254,6 +339,11 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
     }
     if (io.fgen)
         for (int d = 0; d < NV; ++d) w.F[d] += io.fgen[d];
+    w.nself = 0;
+    if (m.self_enabled) {  // limbs against limbs: the overlapping pairs at x_n
+        self_spheres(m, w);
+        self_collect(m, w);
+    }
 
     // hinge diagonal: gearbox damping + end stops
     for (int k = 0; k < NJ; ++k) {
@@ -289,9 +379,9 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
     implicit_solve(m, io, w, f0, n, use_contact);
 
     const T cn_eff = w.c_n + h * w.k_n, ct_eff = w.c_t + h * w.k_t;
+    bool changed = false;
     if (use_contact && any_cand) {  // Coulomb cone and unilateral check, one corrected solve if needed
         body_twists(m, w.f, w.nu1, w.V);
-        bool changed = false;
         for (int c = 0; c < nc; ++c) {
             uint8_t n2 = 0, s2 = 0;
             T fs0 = 0, fs1 = 0;
@@ -317,8 +407,22 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
             w.fslip[c][0] = fs0;
             w.fslip[c][1] = fs1;
         }
-        if (changed) implicit_solve(m, io, w, f0, n, use_contact);
     }
+    const T cs_eff = m.self_c + h * m.self_k;
+    if (w.nself > 0) {  // unilateral: the elements that would pull let go
+        body_twists(m, w.f, w.nu1, w.V);
+        for (int i = 0; i < w.nself; ++i) {
+            if (!w.self_on[i]) continue;
+            const int p = w.self_pair[i];
+            T delta = 0, nv[3], x[3];
+            self_pair(m, w, p, delta, nv, x);
+            if (m.self_k * delta - cs_eff * self_normal_speed(m, w, p, nv, x) <= T(0)) {
+                w.self_on[i] = 0;
+                changed = true;
+            }
+        }
+    }
+    if (changed) implicit_solve(m, io, w, f0, n, use_contact);
 
     // post-step: forces, bristles, ledger
     const T* thd1 = w.nu1 + NB;
@@ -362,6 +466,21 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
             if (io.out_active) io.out_active[c] = 0;
             if (io.out_slip) io.out_slip[c] = 0;
         }
+    }
+
+    if (w.nself > 0) {
+        body_twists(m, w.f, w.nu1, w.V);
+        T work_in = 0, dV = 0;
+        for (int i = 0; i < w.nself; ++i) {
+            const int p = w.self_pair[i];
+            T delta = 0, nv[3], x[3];
+            self_pair(m, w, p, delta, nv, x);
+            const T vn = self_normal_speed(m, w, p, nv, x);
+            if (w.self_on[i]) work_in += -h * (m.self_k * delta - cs_eff * vn) * vn;
+            const T d_new = p_max(delta - h * vn, T(0));
+            dV += T(0.5) * m.self_k * (d_new * d_new - delta * delta);
+        }
+        diss_contact += work_in - dV;
     }
 
     T supplied = 0, copper = 0, gearbox = 0, stops = 0, mech = 0;

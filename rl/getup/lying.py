@@ -15,6 +15,7 @@ from ph_k1.dynamics import body_frames, com_height
 from ph_k1.firmware import FirmwareConfig
 from ph_k1.model import NJ
 from ph_k1.native import K1PHPlantNative
+from ph_k1.self_contact import SelfContactParams
 from ph_k1.spatial import quat_mul
 
 STANDING, SUPINE, PRONE, SIDE = 0, 1, 2, 3
@@ -52,11 +53,11 @@ class LyingLibrary:
 def build_library(model, n: int, kinds, home: torch.Tensor, *, rounds: int = 1, joint_noise: float = 0.35,
                   tilt: float = 0.35, drop_z: float = 0.45, hold_s: float = 0.4, settle_s: float = 1.6,
                   policy_dt: float = 0.02, plant_dt: float = 1e-3, generator: torch.Generator | None = None,
-                  log=print) -> LyingLibrary:
+                  log=print, self_contact: SelfContactParams | None = None) -> LyingLibrary:
     """`rounds` x n drops, the lying kinds in turn; joint noise in units of a third of each joint's range."""
     dev, dt = model.device, model.dtype
     fw = FirmwareConfig(gains="standup", slew=False, delay_ms=(0.0, 0.0), policy_dt=policy_dt)
-    plant = K1PHPlantNative(model=model, batch=n, timestep=plant_dt, firmware=fw)
+    plant = K1PHPlantNative(model=model, batch=n, timestep=plant_dt, firmware=fw, self_contact=self_contact)
     third = (model.jnt_high - model.jnt_low) / 3.0
     kinds_t = torch.as_tensor([KINDS[k] if isinstance(k, str) else int(k) for k in kinds], device=dev)
     rnd = lambda *s: torch.rand(*s, generator=generator, dtype=dt, device=dev)  # noqa: E731

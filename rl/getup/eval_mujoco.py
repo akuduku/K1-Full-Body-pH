@@ -25,7 +25,7 @@ import argparse
 import math
 import sys
 import time
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 
 import mujoco
@@ -129,6 +129,8 @@ def main():
     def com_z():
         return float((mj.body_mass[1:] * d.xipos[1:, 2]).sum() / mj.body_mass[1:].sum())
 
+    self_pairs = Counter()  # body pairs that touch, in MuJoCo physics steps
+
     def contacts():
         foot = {b: False for b in feet}
         other = robot_robot = False
@@ -143,6 +145,8 @@ def main():
                     other = True
             elif b1 != world and b2 != world:
                 robot_robot = True
+                pair_names = sorted(mujoco.mj_id2name(mj, mujoco.mjtObj.mjOBJ_BODY, int(b)) for b in (b1, b2))
+                self_pairs[" - ".join(pair_names)] += 1
         return all(foot.values()), other, robot_robot
 
     T = lambda x: torch.as_tensor(np.asarray(x, dtype=np.float64))[None]  # noqa: E731
@@ -219,6 +223,8 @@ def main():
     print(f"battery over the run {battery:.0f} J (est., the plant's motor constants), controller injection {injected:.0f} J, "
           f"tank limited {limited} of {steps} steps, self-contact in {self_contact_steps} of {steps} policy steps, "
           f"delay {args.delay_ms:g} ms, tank {'off' if args.no_tank else f'{args.tank_capacity:g} J'}")
+    if self_pairs:
+        print("touching body pairs (MuJoCo steps): " + ", ".join(f"{k} {v}" for k, v in self_pairs.most_common(12)))
     if renderer is not None and frames:
         import imageio
 

@@ -34,6 +34,7 @@ from ph_k1 import firmware as fw
 from ph_k1.dynamics import body_frames, com_height
 from ph_k1.model import NB, NJ, load_k1
 from ph_k1.native import K1PHPlantNative
+from ph_k1.self_contact import SelfContactParams
 
 from . import contract as C
 from .impedance import EnergyTank
@@ -100,6 +101,9 @@ class GetUpConfig:
     gain_dr: float = 0.10             # the driver's real gains = commanded x U(1 -+ gain_dr), per robot and episode
     obs_noise: dict = field(default_factory=lambda: {"gyro": 0.2, "gravity": 0.05, "joint_pos": 0.01, "joint_vel": 1.0})
     action_guard: float = 100.0
+    # limbs cannot pass through each other (ph_k1/self_contact.py): without it the policy tucked its hand through
+    # the shank, which works on the plant and not on the robot
+    self_collision: bool = True
     # the controller
     tank: bool = True
     tank_capacity: float = 150.0      # J
@@ -159,7 +163,9 @@ class GetUpEnv(VecEnv):
         self.model = model
         self.fw = fw.FirmwareConfig(gains=C.GAINS, slew=C.SLEW, delay_ms=tuple(cfg.delay_ms), policy_dt=cfg.policy_dt,
                                     delay_hold_prob=cfg.delay_hold_prob, delay_gains=True)
-        self.plant = K1PHPlantNative(model=model, batch=B, timestep=cfg.plant_dt, firmware=self.fw)
+        self.self_contact = SelfContactParams(enabled=cfg.self_collision)
+        self.plant = K1PHPlantNative(model=model, batch=B, timestep=cfg.plant_dt, firmware=self.fw,
+                                     self_contact=self.self_contact)
         self.contract = C.Contract(self.dtype, self.device)
         self.kp0, self.kd0 = (g.clone() for g in self.plant.gains())  # the agent's gains before its first command
         self.tank = EnergyTank(B, NJ, self.dtype, self.device, cfg.tank_capacity, cfg.tank_refill, enabled=cfg.tank)
@@ -222,7 +228,8 @@ class GetUpEnv(VecEnv):
         self.com_stand = float(com_height(model, body_frames(model, self.plant.q)[2]).mean())
         if cfg.start != "standing":
             self.library = build_library(model, cfg.library_size or B, self.kinds, self.contract.home,
-                                         rounds=cfg.library_rounds, policy_dt=cfg.policy_dt, plant_dt=cfg.plant_dt)
+                                         rounds=cfg.library_rounds, policy_dt=cfg.policy_dt, plant_dt=cfg.plant_dt,
+                                         self_contact=self.self_contact)
             self.lib_index = {k: self.library.index(k) for k in self.kinds}
             self.com_low = float(self.library.com_z.mean())
         else:

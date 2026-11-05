@@ -585,3 +585,170 @@ def test_robot_params_in_the_command_path(model64):
         a, b = ref.policy_step(target), nat.policy_step(target)
         same_state(py, nat, 1e-8, f"command path with rows, step {it}")
         _same_command_state(ref, nat, a, b, 1e-8, "command path with rows")
+
+
+# ------------------------------------------------------------------ self-contact (ph_k1/self_contact.py)
+def _self_on(model, batch, **kw):
+    from ph_k1.self_contact import SelfContactParams
+
+    params = SelfContactParams(enabled=True)
+    return pair(model, batch=batch, self_contact=params, **kw)
+
+
+def _hand_on_shank_pose(model):
+    """A pose with the left hand pressed into the left shank: found once from the arm's reach."""
+    from ph_k1.dynamics import forward_kinematics
+    from ph_k1.self_contact import build_geometry, pair_state
+
+    g = build_geometry(model)
+    torch.manual_seed(11)
+    arm, leg = [2, 3, 4, 5], [10, 11, 12, 13]
+    q = torch.zeros(4096, 29, dtype=torch.float64, device=DEVICE)
+    q[:, 3] = 1.0
+    r = torch.rand(4096, NJ, dtype=torch.float64, device=DEVICE)
+    q[:, 7:] = model.jnt_low + r * (model.jnt_high - model.jnt_low)
+    keep = [k for k in range(NJ) if k not in arm + leg]
+    q[:, 7:][:, keep] = 0.0
+    hand, shank = model.body_names.index("left_hand_link"), model.body_names.index("Left_Shank")
+    s = pair_state(g, forward_kinematics(model, q))
+    ba, bb = g.body[g.pair_a], g.body[g.pair_b]
+    want = ((ba == hand) & (bb == shank)) | ((ba == shank) & (bb == hand))
+    depth = (s.delta * want).amax(-1)
+    i = int(depth.argmax())
+    assert depth[i] > 0.005, "no pose with the hand in the shank"
+    return q[i, 7:].clone()
+
+
+def test_self_contact_geometry():
+    """The rest poses have no overlap, neighbours have no element, the hand-shank pair exists."""
+    from ph_k1.dynamics import forward_kinematics
+    from ph_k1.self_contact import AGENT_HOME, MAX_LINKS_APART, _links_apart, build_geometry, pair_state
+
+    m = load_k1(dtype=torch.float64, device=DEVICE)
+    g = build_geometry(m)
+    assert 0 < g.nsphere <= 64 and 0 < g.npair <= 2048
+    q = torch.zeros(2, 29, dtype=torch.float64, device=DEVICE)
+    q[:, 3] = 1.0
+    q[1, 7:] = torch.as_tensor(AGENT_HOME, dtype=torch.float64, device=DEVICE)
+    assert not pair_state(g, forward_kinematics(m, q)).active.any()
+    bodies = {(int(g.body[a]), int(g.body[b])) for a, b in zip(g.pair_a.tolist(), g.pair_b.tolist())}
+    assert all(a != b and _links_apart(m.parent, a, b) > MAX_LINKS_APART for a, b in bodies)
+    hand, shank = m.body_names.index("left_hand_link"), m.body_names.index("Left_Shank")
+    assert (hand, shank) in bodies or (shank, hand) in bodies
+
+
+def test_self_contact_matches_reference(model64):
+    """C++ == Python with limbs pressed together, in contact with the floor too, energy ledger included."""
+    torch.manual_seed(12)
+    B = 3
+    py, nat = _self_on(model64, B)
+    pose = _hand_on_shank_pose(model64)
+    py.reset(pose=pose.expand(B, NJ).clone())
+    py.p = 0.2 * torch.randn_like(py.p)
+    copy_state(py, nat)
+    v = 2.0 * torch.randn(B, NJ, dtype=torch.float64, device=DEVICE)
+    for _ in range(40):
+        a, b = py.step(v), nat.step(v)
+    same_state(py, nat, 1e-7, "self-contact")
+
+
+def test_self_contact_keeps_momentum_and_closes_the_ledger(model64):
+    """Free flight, no gravity, motors off: the elements are internal (total momentum stays), and the energy they
+    take out is in the ledger."""
+    from ph_k1.dynamics import forward_kinematics
+    from ph_k1.self_contact import build_geometry, pair_state, SelfContactParams
+
+    from ph_k1.contact import ContactParams
+
+    pl = K1PHPlantNative(model=model64, batch=1, timestep=2.5e-4, gravity=False, motors_connected=False,
+                         contact=ContactParams(enabled=False), self_contact=SelfContactParams(enabled=True))
+    pl.motors.damping = pl.motors.damping * 0.0
+    pl.limits.enabled = False
+    pl.reset(pose=_hand_on_shank_pose(model64), base_pos=(0.0, 0.0, 2.0))
+    assert pair_state(build_geometry(model64), forward_kinematics(model64, pl.q)).active.any()
+    def world_momentum():
+        kin = pl.kinematics()
+        v = kin.J @ pl.velocity(kin)[..., None]                          # (B, nb, 6, 1) body twists
+        return (kin.I @ v).squeeze(-1).sum(1)                             # spatial momentum about O
+    p0, h0 = world_momentum(), pl.energy()["total"].clone()
+    for _ in range(800):
+        pl.step()
+    p1, h1 = world_momentum(), pl.energy()["total"]
+    assert (p1 - p0).abs().max() < 1e-6, (p1 - p0)
+    assert pl.ledger.contact.item() > 1e-3, "the dampers should have worked"
+    residual = (h1 - h0 + pl.ledger.dissipated).abs().item()
+    assert residual < 0.03 * max(pl.ledger.contact.item(), 1e-6) + 1e-6, residual
+
+
+def _hand_out_and_in(model):
+    """(start, target, want): the left arm with the hand clear of the shank, a target that drives it deep in, and the
+    mask of the hand-shank pairs."""
+    from ph_k1.dynamics import forward_kinematics
+    from ph_k1.self_contact import build_geometry, pair_state
+
+    g = build_geometry(model)
+    hand, shank = model.body_names.index("left_hand_link"), model.body_names.index("Left_Shank")
+    ba, bb = g.body[g.pair_a], g.body[g.pair_b]
+    want = ((ba == hand) & (bb == shank)) | ((ba == shank) & (bb == hand))
+    deep = _hand_on_shank_pose(model)
+    q = torch.zeros(1, 29, dtype=torch.float64, device=DEVICE)
+    q[:, 3] = 1.0
+    overlap = lambda pose: float((pair_state(g, forward_kinematics(model, torch.cat((q[:, :7], pose[None]), 1))).delta  # noqa: E731
+                                  * want).amax())
+    for j, sgn in ((4, 1.0), (4, -1.0), (2, 1.0), (2, -1.0), (3, 1.0), (3, -1.0)):
+        for a in (0.3, 0.5, 0.8):
+            start = deep.clone()
+            start[j] += sgn * a
+            if overlap(start) == 0.0 and model.jnt_low[j] <= start[j] <= model.jnt_high[j]:
+                return start, deep, want
+    raise AssertionError("no clear start pose")
+
+
+def test_self_contact_stops_the_hand():
+    """A strong servo drives the hand from outside towards a pose deep inside the shank.  Off: it goes all the way.
+    On: the shank stops it short of the target, with a small overlap."""
+    from ph_k1.dynamics import forward_kinematics
+    from ph_k1.self_contact import SelfContactParams, build_geometry, pair_state
+
+    m = load_k1(dtype=torch.float64, device=DEVICE)
+    g = build_geometry(m)
+    start, deep, want = _hand_out_and_in(m)
+    final = {}
+    for on in (False, True):
+        pl = K1PHPlantNative(model=m, batch=1, timestep=1e-3, fixed_base=True, gravity=False,
+                             self_contact=SelfContactParams(enabled=on))
+        pl.reset(pose=start)
+        kp, kd = pl.gains("standup")
+        for _ in range(60):
+            pl.policy_step(deep[None], 20, kp=kp * 3, kd=kd * 3)
+        assert torch.isfinite(pl.q).all()
+        final[on] = (float((pair_state(g, forward_kinematics(m, pl.q)).delta * want).amax()),
+                     float((pl.theta[0] - deep).abs().max()))
+    assert final[False][0] > 0.05, final            # off: > 5 cm inside
+    assert final[False][1] < 0.02, final            # ... and on target
+    assert final[True][0] < 0.25 * final[False][0], final
+    assert final[True][1] > 0.1, final              # on: stopped short of the target
+
+
+def test_self_contact_is_stable_from_a_deep_overlap():
+    """Released from an 87 mm overlap at the training step: no kick (the speed of a fine step) and a closed ledger."""
+    from ph_k1.contact import ContactParams
+    from ph_k1.self_contact import SelfContactParams
+
+    m = load_k1(dtype=torch.float64, device=DEVICE)
+    pose = _hand_on_shank_pose(m)
+    vmax, residual = {}, {}
+    for h in (1e-3, 2.5e-4):
+        pl = K1PHPlantNative(model=m, batch=1, timestep=h, gravity=False, contact=ContactParams(enabled=False),
+                             self_contact=SelfContactParams(enabled=True))
+        pl.reset(pose=pose, base_pos=(0.0, 0.0, 2.0))
+        h0 = float(pl.energy()["total"])
+        v = 0.0
+        for _ in range(round(0.3 / h)):
+            pl.step()
+            v = max(v, float(pl.velocity()[:, NB:].abs().max()))
+        vmax[h] = v
+        residual[h] = abs(float(pl.energy()["total"]) - h0 + float(pl.ledger.dissipated[0]) - float(pl.ledger.supplied[0]))
+        assert float(pl.energy()["total"]) <= h0 + 1e-6, "no energy from nothing"
+    assert vmax[1e-3] < 1.5 * vmax[2.5e-4] + 1.0, vmax
+    assert residual[1e-3] < 0.15 * h0, (residual, h0)

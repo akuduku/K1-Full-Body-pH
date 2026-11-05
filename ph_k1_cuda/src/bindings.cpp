@@ -61,6 +61,11 @@ torch::Tensor pack(const TensorMap& t, const std::map<std::string, double>& s, c
     m.gravity = flag("gravity");
     m.contact_enabled = flag("contact_enabled");
     m.limits_enabled = flag("limits_enabled");
+    m.self_enabled = flag("self_enabled");
+    m.nsphere = flag("nsphere");
+    m.npair = flag("npair");
+    TORCH_CHECK(m.nsphere >= 0 && m.nsphere <= ph::MAX_SPHERES, "nsphere ", m.nsphere, " outside 0..", ph::MAX_SPHERES);
+    TORCH_CHECK(m.npair >= 0 && m.npair <= ph::MAX_SELF_PAIRS, "npair ", m.npair, " outside 0..", ph::MAX_SELF_PAIRS);
     m.h = static_cast<T>(num("h"));
     put(m.g, t, "g", 3);
     const int nb = m.nbody, nc = m.ncontact;
@@ -91,6 +96,17 @@ torch::Tensor pack(const TensorMap& t, const std::map<std::string, double>& s, c
     m.k_t = static_cast<T>(num("k_t"));
     m.c_t = static_cast<T>(num("c_t"));
     m.mu = static_cast<T>(num("mu"));
+    if (m.nsphere > 0) {
+        put_int(m.sphere_body, t, "sphere_body", m.nsphere);
+        put(&m.sphere_pos[0][0], t, "sphere_pos", m.nsphere * 3);
+        put(m.sphere_r, t, "sphere_r", m.nsphere);
+    }
+    if (m.npair > 0) {
+        put_int(m.pair_a, t, "pair_a", m.npair);
+        put_int(m.pair_b, t, "pair_b", m.npair);
+    }
+    m.self_k = static_cast<T>(num("self_k"));
+    m.self_c = static_cast<T>(num("self_c"));
     put(m.mk, t, "motor_k", ph::NJ);
     put(m.mR, t, "motor_R", ph::NJ);
     put(m.mL, t, "motor_L", ph::NJ);

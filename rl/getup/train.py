@@ -61,6 +61,7 @@ def main():
     ap.add_argument("--push-dv", type=float, default=0.3)
     ap.add_argument("--library-rounds", type=int, default=1)
     ap.add_argument("--reward", action="append", help="NAME=WEIGHT, overrides a reward weight (repeatable)")
+    ap.add_argument("--no-self-collision", action="store_true", help="limbs may pass through each other (old runs)")
     ap.add_argument("--energy-scale-lo", type=float, default=0.0,
                     help="weight of battery/impacts before the robot gets up (old runs: 0.25)")
     ap.add_argument("--gain-free-ema", type=float, default=0.5,
@@ -74,7 +75,7 @@ def main():
                       tank_capacity=args.tank_capacity, tank_refill=args.tank_refill, assist_force=args.assist_n,
                       lying_kinds=tuple(k.strip() for k in args.lying_kinds.split(",") if k.strip()),
                       push_dv=args.push_dv, library_rounds=args.library_rounds, rewards=parse_rewards(args.reward),
-                      energy_scale_lo=args.energy_scale_lo,
+                      energy_scale_lo=args.energy_scale_lo, self_collision=not args.no_self_collision,
                       gain_free_ema=None if args.gain_free_ema < 0 else args.gain_free_ema)
     env = GetUpEnv(cfg)
     print(f"[getup] {args.num_envs} robots on {args.device}, stand trunk z {env.stand_z:.3f} m, CoM {env.com_low:.3f} "
