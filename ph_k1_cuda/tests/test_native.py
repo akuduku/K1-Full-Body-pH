@@ -504,7 +504,7 @@ def _random_rows(B, seed):
 
 
 def test_neutral_robot_params_change_nothing(model64):
-    """Rows of ones/zeros give bit for bit the same trajectory as no rows (C++ and Python)."""
+    """Rows of ones/zeros give the same trajectory as no rows (C++ and Python): bit for bit on the CPU."""
     from ph_k1.robot_params import neutral_rows
 
     torch.manual_seed(6)
@@ -519,8 +519,11 @@ def test_neutral_robot_params_change_nothing(model64):
         for pl in (*plain, *rows):
             pl.step(v)
     for a, b in zip(plain, rows):
-        for name in ("q", "p", "xi", "lam"):
-            assert torch.equal(getattr(a, name), getattr(b, name)), name
+        if DEVICE == "cpu":  # bit for bit
+            for name in ("q", "p", "xi", "lam"):
+                assert torch.equal(getattr(a, name), getattr(b, name)), name
+        else:  # the GPU's linear algebra may round differently between two plants: round-off only
+            same_state(a, b, 1e-8, "neutral rows (GPU)")
 
 
 def test_robot_params_match_reference(model64):
