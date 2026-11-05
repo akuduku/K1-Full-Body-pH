@@ -601,11 +601,11 @@ def _hand_on_shank_pose(model):
     from ph_k1.self_contact import build_geometry, pair_state
 
     g = build_geometry(model)
-    torch.manual_seed(11)
     arm, leg = [2, 3, 4, 5], [10, 11, 12, 13]
     q = torch.zeros(4096, 29, dtype=torch.float64, device=DEVICE)
     q[:, 3] = 1.0
-    r = torch.rand(4096, NJ, dtype=torch.float64, device=DEVICE)
+    # drawn on the CPU: the same pose on every device (a GPU's random numbers differ)
+    r = torch.rand(4096, NJ, dtype=torch.float64, generator=torch.Generator().manual_seed(11)).to(DEVICE)
     q[:, 7:] = model.jnt_low + r * (model.jnt_high - model.jnt_low)
     keep = [k for k in range(NJ) if k not in arm + leg]
     q[:, 7:][:, keep] = 0.0
@@ -653,31 +653,38 @@ def test_self_contact_matches_reference(model64):
 
 
 def test_self_contact_keeps_momentum_and_closes_the_ledger(model64):
-    """Free flight, no gravity, motors off: the elements are internal (total momentum stays), and the energy they
-    take out is in the ledger."""
+    """Free flight, no gravity, motors off, from a deep overlap: the elements are internal (total momentum stays), and
+    the energy they take out is in the ledger up to the integrator's first-order error (a few % of the losses at
+    h = 0.25 ms, as the ground contact), which halves with the step."""
+    from ph_k1.contact import ContactParams, LimitParams
     from ph_k1.dynamics import forward_kinematics
-    from ph_k1.self_contact import build_geometry, pair_state, SelfContactParams
+    from ph_k1.self_contact import SelfContactParams, build_geometry, pair_state
 
-    from ph_k1.contact import ContactParams
+    pose = _hand_on_shank_pose(model64)
+    share = {}
+    for h in (2.5e-4, 1.25e-4):
+        pl = K1PHPlantNative(model=model64, batch=1, timestep=h, gravity=False, motors_connected=False,
+                             contact=ContactParams(enabled=False), limits=LimitParams(enabled=False),
+                             self_contact=SelfContactParams(enabled=True))
+        pl.motors.damping = pl.motors.damping * 0.0
+        pl.reset(pose=pose, base_pos=(0.0, 0.0, 2.0))
+        assert pair_state(build_geometry(model64), forward_kinematics(model64, pl.q)).active.any()
 
-    pl = K1PHPlantNative(model=model64, batch=1, timestep=2.5e-4, gravity=False, motors_connected=False,
-                         contact=ContactParams(enabled=False), self_contact=SelfContactParams(enabled=True))
-    pl.motors.damping = pl.motors.damping * 0.0
-    pl.limits.enabled = False
-    pl.reset(pose=_hand_on_shank_pose(model64), base_pos=(0.0, 0.0, 2.0))
-    assert pair_state(build_geometry(model64), forward_kinematics(model64, pl.q)).active.any()
-    def world_momentum():
-        kin = pl.kinematics()
-        v = kin.J @ pl.velocity(kin)[..., None]                          # (B, nb, 6, 1) body twists
-        return (kin.I @ v).squeeze(-1).sum(1)                             # spatial momentum about O
-    p0, h0 = world_momentum(), pl.energy()["total"].clone()
-    for _ in range(800):
-        pl.step()
-    p1, h1 = world_momentum(), pl.energy()["total"]
-    assert (p1 - p0).abs().max() < 1e-6, (p1 - p0)
-    assert pl.ledger.contact.item() > 1e-3, "the dampers should have worked"
-    residual = (h1 - h0 + pl.ledger.dissipated).abs().item()
-    assert residual < 0.03 * max(pl.ledger.contact.item(), 1e-6) + 1e-6, residual
+        def world_momentum():
+            kin = pl.kinematics()
+            v = kin.J @ pl.velocity(kin)[..., None]                      # (B, nb, 6, 1) body twists
+            return (kin.I @ v).squeeze(-1).sum(1)                         # spatial momentum about O
+
+        p0, h0 = world_momentum(), pl.energy()["total"].clone()
+        for _ in range(round(0.2 / h)):
+            pl.step()
+        p1, h1 = world_momentum(), pl.energy()["total"]
+        assert (p1 - p0).abs().max() < 1e-6, (p1 - p0)
+        losses = pl.ledger.contact.item()
+        assert losses > 1e-3, "the dampers should have worked"
+        share[h] = (h1 - h0 + pl.ledger.dissipated).abs().item() / losses
+    assert share[2.5e-4] < 0.05, share
+    assert share[1.25e-4] < 0.75 * share[2.5e-4], share
 
 
 def _hand_out_and_in(model):
