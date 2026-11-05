@@ -237,3 +237,59 @@ def test_curriculum_starts_without_movement_costs_and_with_fixed_gains():
     old = {k: v for k, v in s.items() if not k.startswith("gain_")}   # a checkpoint from before: full range
     env.load_curriculum_state(old)
     assert env.gain_scale == 1.0
+
+
+class _FakePlant:
+    def __init__(self):
+        from ph_k1.model import load_k1 as load
+        self.model = load()
+        self.q = torch.zeros(1, 29, dtype=torch.float64)
+        self.q[0, 2] = 0.5
+        self.q[0, 3] = 1.0
+
+
+def test_a_crashing_renderer_does_not_touch_the_caller(tmp_path, monkeypatch):
+    """The video is drawn in a child process: if that one dies with SIGSEGV (as EGL did inside the training on Kaggle)
+    the caller gets an exception, and VideoMaker switches the videos off and returns."""
+    from ph_k1 import video
+    from rl.common import harness as H
+
+    bomb = tmp_path / "bomb.py"
+    bomb.write_text("import os, signal\nos.kill(os.getpid(), signal.SIGSEGV)\n")
+    monkeypatch.setattr(video, "RENDERER", bomb)
+    rec = video.VideoRecorder(_FakePlant())
+    rec.capture()
+    with pytest.raises(RuntimeError, match="render process exited"):
+        rec.save(tmp_path / "x.mp4")
+
+    class Env:
+        device = "cpu"
+        plant = _FakePlant()
+
+        def _reset_idx(self, ids):
+            pass
+
+        def get_observations(self):
+            return torch.zeros(1, 3)
+
+        def step(self, a):
+            return torch.zeros(1, 3), None, None, None
+
+    vm = H.VideoMaker(Env, 0.1, 0.02, tmp_path, "t")
+    assert vm(lambda o: o, 1) is None and vm.broken
+    assert vm(lambda o: o, 2) is None
+
+
+def test_video_is_drawn_by_the_child_process(tmp_path):
+    from ph_k1.video import VideoRecorder
+
+    plant = _FakePlant()
+    rec = VideoRecorder(plant, fps=25.0)
+    for k in range(5):
+        plant.q[0, 0] = 0.01 * k
+        rec.capture()
+    try:
+        path = rec.save(tmp_path / "x.mp4", timeout=120)
+    except RuntimeError as e:
+        pytest.skip(f"no GL backend here: {e}")
+    assert path.stat().st_size > 1000

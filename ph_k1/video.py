@@ -3,6 +3,7 @@ r"""MP4 videos of the pH plant, e.g. for W&B every 500 training iterations.
 MuJoCo only DRAWS here, exactly like render.py's viewer: q has MuJoCo's qpos layout, so
 qpos = q[b] and mj_kinematics place the bodies; mj_step is never called.
 
+The drawing happens in a child process (ph_k1/render_frames.py), which inherits the environment.
 Headless machines (Kaggle, Colab): set MUJOCO_GL before mujoco is imported (before importing ph_k1),
     MUJOCO_GL=egl         NVIDIA GPU
     MUJOCO_GL=osmesa      software fallback (apt-get install libosmesa6)
@@ -18,47 +19,48 @@ and have an MP4 writer:  pip install imageio imageio-ffmpeg
 
 from __future__ import annotations
 
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
-import mujoco
 import numpy as np
+
+RENDERER = Path(__file__).with_name("render_frames.py")
 
 
 class VideoRecorder:
-    """Frames of robot `b` with a camera that follows the trunk."""
+    """Frames of robot `b` with a camera that follows the trunk.
+
+    capture() only keeps the pose; save() draws them in a child process (ph_k1/render_frames.py), so no OpenGL context
+    ever exists in the calling process: a crash of the renderer raises RuntimeError here instead of killing a training."""
 
     def __init__(self, plant, b: int = 0, width: int = 640, height: int = 480, fps: float = 50.0,
                  distance: float = 2.2, azimuth: float = 135.0, elevation: float = -15.0):
         self.plant, self.b, self.fps = plant, b, fps
-        self.mj = plant.model.mj
-        self.data = mujoco.MjData(self.mj)
-        width = min(width, self.mj.vis.global_.offwidth)
-        height = min(height, self.mj.vis.global_.offheight)
-        self.renderer = mujoco.Renderer(self.mj, height=height, width=width)
-        self.cam = mujoco.MjvCamera()
-        self.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-        self.cam.distance, self.cam.azimuth, self.cam.elevation = distance, azimuth, elevation
+        self.size = (width, height)
+        self.view = (distance, azimuth, elevation)
         self.frames: list[np.ndarray] = []
 
     def capture(self) -> None:
-        q = self.plant.q[self.b].detach().to("cpu", dtype=self.plant.q.dtype).double().numpy()
-        self.data.qpos[:] = q
-        mujoco.mj_kinematics(self.mj, self.data)
-        # follow the trunk at a fixed height (mj_kinematics does not compute what a tracking camera needs)
-        self.cam.lookat[:] = (q[0], q[1], max(q[2] - 0.1, 0.3))
-        self.renderer.update_scene(self.data, camera=self.cam)
-        self.frames.append(self.renderer.render().copy())
+        self.frames.append(self.plant.q[self.b].detach().to("cpu").double().numpy().copy())
 
-    def save(self, path: str | Path) -> Path:
-        import imageio
-
+    def save(self, path: str | Path, timeout: float = 600.0) -> Path:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        imageio.mimsave(str(path), self.frames, fps=self.fps, macro_block_size=8)
+        with tempfile.TemporaryDirectory() as tmp:
+            npz = Path(tmp) / "frames.npz"
+            np.savez(npz, qpos=np.stack(self.frames), xml=str(self.plant.model.xml_path), fps=self.fps,
+                     width=self.size[0], height=self.size[1], distance=self.view[0], azimuth=self.view[1],
+                     elevation=self.view[2])
+            r = subprocess.run([sys.executable, str(RENDERER), str(npz), str(path)], capture_output=True, text=True,
+                               timeout=timeout)
+        if r.returncode != 0 or not path.exists():
+            raise RuntimeError(f"render process exited with {r.returncode}: {r.stderr[-300:]}")
         return path
 
     def close(self) -> None:
-        self.renderer.close()
+        pass
 
 
 def log_video(path: str | Path, key: str = "video", step: int | None = None, fps: float = 50.0) -> bool:

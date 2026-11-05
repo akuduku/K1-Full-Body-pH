@@ -54,6 +54,8 @@ def add_arguments(ap, *, run_prefix: str, wandb_project: str, iterations: int = 
                     help="checkpoint every N minutes of training (0: off)")
     ap.add_argument("--video-every-min", type=float, default=video_every_min,
                     help="video every N minutes of training (0: off)")
+    ap.add_argument("--first-video-min", type=float, default=0.0,
+                    help="with --video-every-min: the first video after this many minutes (0: after one interval)")
     ap.add_argument("--video-seconds", type=float, default=8.0)
     ap.add_argument("--learning-rate", type=float, default=learning_rate)
     ap.add_argument("--entropy-coef", type=float, default=entropy_coef)
@@ -208,6 +210,8 @@ def train(env, args, *, tag: str, hidden_dims, export: Callable | None = None, v
     budget_min = max(args.max_minutes, 60.0 * args.hours)
     t0 = time.time()
     state = {"last_save": t0, "last_video": t0, "reason": None, "sigint": False, "run_id": None}
+    if args.first_video_min > 0:  # an early video proves the video path works
+        state["last_video"] = t0 - max(args.video_every_min - args.first_video_min, 0.0) * 60
 
     # every checkpoint also as the firmware's file, uploaded next to it; the env's curriculum goes inside
     save = runner.save
