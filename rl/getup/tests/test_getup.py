@@ -239,6 +239,101 @@ def test_curriculum_starts_without_movement_costs_and_with_fixed_gains():
     assert env.gain_scale == 1.0
 
 
+def _small_env(**kw):
+    from rl.getup.env import GetUpConfig, GetUpEnv
+    return GetUpEnv(GetUpConfig(**{"num_envs": 4, "device": DEVICE, "dtype": "float64", "library_size": 8, **kw}))
+
+
+def test_tank_acts_only_once_the_gains_unlock():
+    """tank_with_gains: with the agent's fixed gains the tank only measures; it acts from gain_scale > 0 on."""
+    env = _small_env()
+    _, _, _, extras = env.step(torch.zeros(4, C.NUM_ACTIONS, dtype=torch.float64))
+    assert env.gains_locked and not env.tank.enabled and float(extras["log"]["Energy/tank_on"]) == 0.0
+    assert not bool(extras["log"]["Energy/tank_limited"])
+    s = env.curriculum_state()
+    assert s["tank_with_gains"] is True and s["mask_locked_gains"] is True
+    env.load_curriculum_state({**s, "gain_scale": 0.2})
+    _, _, _, extras = env.step(torch.zeros(4, C.NUM_ACTIONS, dtype=torch.float64))
+    assert env.tank.enabled and float(extras["log"]["Energy/tank_on"]) == 1.0
+    old = _small_env(tank_with_gains=False)          # the runs up to getup-mb-v1d: on from the start
+    old.step(torch.zeros(4, C.NUM_ACTIONS, dtype=torch.float64))
+    assert old.gains_locked and old.tank.enabled
+    off = _small_env(tank=False)                     # the ablation stays off
+    off.load_curriculum_state({**off.curriculum_state(), "gain_scale": 1.0})
+    off.step(torch.zeros(4, C.NUM_ACTIONS, dtype=torch.float64))
+    assert not off.tank.enabled
+
+
+def test_locked_gain_outputs_read_zero_in_the_observation():
+    env = _small_env()
+    a = torch.randn(4, C.NUM_ACTIONS, dtype=torch.float64, device=DEVICE)
+    obs, _, _, _ = env.step(a)
+    last = slice(6 + 2 * NJ, 6 + 2 * NJ + C.NUM_ACTIONS)
+    for key in ("policy", "critic"):
+        seen = obs[key][:, last]
+        assert torch.equal(seen[:, :NJ], a[:, :NJ]) and (seen[:, NJ:] == 0).all(), key
+    mask = env.locked_actions()
+    assert mask.shape == (C.NUM_ACTIONS,) and not mask[:NJ].any() and mask[NJ:].all()
+    env.load_curriculum_state({**env.curriculum_state(), "gain_scale": 0.2})
+    obs, _, _, _ = env.step(a)
+    assert torch.equal(obs["policy"][:, last], a) and not env.locked_actions().any()
+    raw = _small_env(mask_locked_gains=False)        # the runs up to getup-mb-v1d
+    obs, _, _, _ = raw.step(a)
+    assert torch.equal(obs["policy"][:, last], a)
+
+
+def test_harness_holds_the_std_of_locked_outputs():
+    pytest.importorskip("rsl_rl")
+    from rl.common.harness import hold_locked_std
+    from rsl_rl.modules.distribution import GaussianDistribution
+
+    mask = torch.zeros(C.NUM_ACTIONS, dtype=torch.bool)
+    mask[NJ:] = True
+    for std_type in ("scalar", "log"):
+        dist = GaussianDistribution(C.NUM_ACTIONS, init_std=3.4, std_type=std_type)
+        if std_type == "scalar":
+            with torch.no_grad():
+                dist.std_param[:3] = 0.3
+        holder = torch.nn.Module()
+        holder.distribution = dist
+        hold_locked_std(holder, mask, 0.8)
+        std = dist.std_param if std_type == "scalar" else dist.log_std_param.exp()
+        assert torch.allclose(std[NJ:], torch.full((2 * NJ,), 0.8)), std_type
+        assert torch.allclose(std[3:NJ], torch.full((NJ - 3,), 3.4)), std_type  # the free outputs keep theirs
+        if std_type == "scalar":
+            assert torch.allclose(std[:3], torch.full((3,), 0.3))  # and nothing is raised
+        hold_locked_std(holder, torch.zeros(C.NUM_ACTIONS, dtype=torch.bool), 0.8)  # nothing locked: no change
+        assert torch.allclose(std[3:NJ], torch.full((NJ - 3,), 3.4))
+
+
+def test_no_noise_eval_reports_per_kind_and_leaves_the_training_alone():
+    from rl.getup.evaluate import NoNoiseEval
+
+    train = _small_env()
+    train.success_ema = {k: 0.3 for k in train.success_ema}
+    before = train.curriculum_state()
+
+    class Zero(torch.nn.Module):  # the deterministic policy: HOME targets, fixed gains
+        def __init__(self):
+            super().__init__()
+            self.w = torch.nn.Parameter(torch.zeros(1, dtype=torch.float64, device=DEVICE))
+
+        def forward(self, obs):
+            return torch.zeros(obs["policy"].shape[0], C.NUM_ACTIONS, dtype=torch.float64, device=DEVICE) * self.w
+
+    ev = NoNoiseEval(lambda: _small_env(assist_force=0.0, push_dv=0.0, seed=3), train, seconds=0.1)
+    out = ev(Zero(), 7)
+    names = {"supine", "prone"}
+    assert {f"Eval/success_{k}" for k in names} <= set(out) and {f"Eval/stood_{k}" for k in names} <= set(out)
+    assert all(0.0 <= out[f"Eval/{m}_{k}"] <= 1.0 for m in ("success", "stood") for k in names)
+    assert 0.0 <= out["Eval/tank_limited"] <= 1.0
+    assert ev.env.gain_scale == train.gain_scale and not ev.env.tank.enabled
+    assert (ev.env.start_type != 0).all(), "only lying starts"
+    assert train.curriculum_state() == before, "the evaluation must not move the training's curriculum"
+    out2 = ev(Zero(), 8)  # a second call reuses the env
+    assert {f"Eval/success_{k}" for k in names} <= set(out2)
+
+
 class _FakePlant:
     def __init__(self):
         from ph_k1.model import load_k1 as load

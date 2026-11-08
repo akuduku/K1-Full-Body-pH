@@ -108,6 +108,15 @@ class GetUpConfig:
     tank: bool = True
     tank_capacity: float = 150.0      # J
     tank_refill: float = 1.0          # share of the controller's damping dissipation that goes back into the tank
+    # the tank acts only once the variable gains do (gain_scale > 0); with the agent's fixed gains it only measures
+    # (the stock StandupAgent has no tank).  On from the start (getup-mb-v1d), the policy got up from the front only
+    # WITH its action noise, which refills the tank through the dampers: 97 % with noise, 12 % without (the robot
+    # runs without).  False: on from the start, as the runs before
+    tank_with_gains: bool = True
+    # while the gains are locked (gain_scale 0) the 44 gain outputs act on nothing: they read 0 in the observed last
+    # action.  Unmasked (getup-mb-v1d), nothing held their noise down (std 3.4) and it was fed back into the input.
+    # False: as the runs before
+    mask_locked_gains: bool = True
     # starts
     lying_kinds: tuple = ("supine", "prone")
     lying_share: tuple = (0.5, 0.85)  # grows with the lying success
@@ -245,6 +254,22 @@ class GetUpEnv(VecEnv):
     def iteration(self) -> float:
         return self.common_step_counter / self.cfg.steps_per_env
 
+    @property
+    def gains_locked(self) -> bool:
+        """The gain curriculum has not started: the driver gets the agent's fixed gains kKp / kKd."""
+        return self.gain_scale <= 0.0
+
+    def _sync_tank(self) -> None:
+        self.tank.enabled = self.cfg.tank and not (self.cfg.tank_with_gains and self.gains_locked)
+
+    def locked_actions(self) -> torch.Tensor:
+        """(66,) bool: the outputs that act on nothing now (the 44 gain outputs while the gains are locked).  The
+        harness holds their std at the start value, else the entropy bonus inflates it with nothing against it."""
+        mask = torch.zeros(C.NUM_ACTIONS, dtype=torch.bool)
+        if self.gains_locked:
+            mask[NJ:] = True
+        return mask
+
     # ------------------------------------------------------------------ reset
     def _choose_starts(self, n):
         c = self.cfg
@@ -369,7 +394,9 @@ class GetUpEnv(VecEnv):
                 "lying_share": self.lying_share, "head_start_iter": self.head_start_iter, "head_scale": self.head_scale,
                 "push_start_iter": self.push_start_iter, "push_scale": self.push_scale,
                 "energy_scale": self.energy_scale, "gain_start_iter": self.gain_start_iter,
-                "gain_scale": self.gain_scale, "common_step_counter": self.common_step_counter}
+                "gain_scale": self.gain_scale, "common_step_counter": self.common_step_counter,
+                # how the policy must be run (eval_mujoco.py, the robot); not restored, the config decides
+                "tank_with_gains": self.cfg.tank_with_gains, "mask_locked_gains": self.cfg.mask_locked_gains}
 
     def load_curriculum_state(self, s: dict) -> None:
         for k in self.kinds:
@@ -382,6 +409,7 @@ class GetUpEnv(VecEnv):
         self.gain_start_iter = s.get("gain_start_iter")
         self.gain_scale = float(s.get("gain_scale", 1.0))  # checkpoints from before the gain curriculum: full range
         self.common_step_counter = int(s["common_step_counter"])
+        self._sync_tank()
 
     # ------------------------------------------------------------ external inputs
     def _pushes(self):
@@ -463,10 +491,11 @@ class GetUpEnv(VecEnv):
         theta = q[:, 7:]
         g = self.contract.projected_gravity(q[:, 3:7])
         tank = self.tank.fraction()
-        clean = self.contract.observe(self.gyro, g, theta, self.qd, self.actions, tank)
+        masked = self.cfg.mask_locked_gains and self.gains_locked
+        clean = self.contract.observe(self.gyro, g, theta, self.qd, self.actions, tank, masked)
         actor = self.contract.observe(self._noise(self.gyro, "gyro"), self._noise(g, "gravity"),
                                       self._noise(theta, "joint_pos"), self._noise(self.qd, "joint_vel"),
-                                      self.actions, tank)
+                                      self.actions, tank, masked)
         active = self.contact.to(self.dtype)
         feet = torch.stack(((active @ self.left_sole) > 0, (active @ self.right_sole) > 0), -1).to(self.dtype)
         others = (self.contact & self.other_point).to(self.dtype).mean(-1, keepdim=True)
@@ -481,6 +510,7 @@ class GetUpEnv(VecEnv):
         c, m = self.cfg, self.model
         dt = c.policy_dt
         a = torch.nan_to_num(actions.to(self.device, self.dtype)).clamp(-c.action_guard, c.action_guard)
+        self._sync_tank()  # on once the gain curriculum starts (tank_with_gains)
         self.prev_actions = self.actions
         self.actions = a
         target_raw, kp, kd = self.contract.decode(a, self.gain_scale)
@@ -546,6 +576,7 @@ class GetUpEnv(VecEnv):
             "Energy/contact_W": (d_contact / dt).mean(),
             "Energy/tank_J": tank["level"].mean(),
             "Energy/tank_limited": tank["limited"].to(self.dtype).mean(),
+            "Energy/tank_on": torch.tensor(float(self.tank.enabled)),
             "Energy/tank_injected_W": (tank["injected"].clamp_min(0.0) / dt).mean(),
             "Energy/tank_violation_J": tank["violation"].mean(),
             "Metrics/standing": self.standing.to(self.dtype).mean(),

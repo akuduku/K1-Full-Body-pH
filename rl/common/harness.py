@@ -17,6 +17,7 @@ An env may define curriculum_state() -> dict and load_curriculum_state(dict), an
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import signal
@@ -39,7 +40,8 @@ TimeBudgetReached = StopTraining  # the name rl/stand used before
 
 def add_arguments(ap, *, run_prefix: str, wandb_project: str, iterations: int = 3000, save_every: int = 250,
                   video_every: int = 500, save_every_min: float = 0.0, video_every_min: float = 0.0,
-                  entropy_coef: float = 0.005, init_std: float = 0.5, learning_rate: float = 1e-3) -> None:
+                  entropy_coef: float = 0.005, init_std: float = 0.5, learning_rate: float = 1e-3,
+                  eval_every_min: float = 0.0, first_eval_min: float = 0.0) -> None:
     ap.add_argument("--run-name", default=time.strftime(f"{run_prefix}-%Y%m%d-%H%M"))
     ap.add_argument("--num-envs", type=int, default=4096)
     ap.add_argument("--iterations", type=int, default=iterations,
@@ -57,6 +59,11 @@ def add_arguments(ap, *, run_prefix: str, wandb_project: str, iterations: int = 
     ap.add_argument("--first-video-min", type=float, default=0.0,
                     help="with --video-every-min: the first video after this many minutes (0: after one interval)")
     ap.add_argument("--video-seconds", type=float, default=8.0)
+    ap.add_argument("--eval-every-min", type=float, default=eval_every_min,
+                    help="evaluate the policy without action noise every N minutes of training, if the skill has an "
+                         "evaluation (0: off)")
+    ap.add_argument("--first-eval-min", type=float, default=first_eval_min,
+                    help="with --eval-every-min: the first evaluation after this many minutes (0: after one interval)")
     ap.add_argument("--learning-rate", type=float, default=learning_rate)
     ap.add_argument("--entropy-coef", type=float, default=entropy_coef)
     ap.add_argument("--init-std", type=float, default=init_std)
@@ -182,12 +189,44 @@ class VideoMaker:
             return None
 
 
+def hold_locked_std(policy, mask: torch.Tensor | None, cap: float) -> None:
+    """Clamp the action std of the outputs in mask ((num_actions,) bool) to at most cap, in place.
+
+    For outputs that act on nothing (an env's locked_actions()): PPO's entropy bonus raises their std and nothing in
+    the return pulls it back (getup-mb-v1d: 0.8 -> 3.4 for the 44 locked gain outputs)."""
+    dist = getattr(policy, "distribution", None)
+    if dist is None or mask is None or not bool(mask.any()):
+        return
+    with torch.no_grad():
+        if hasattr(dist, "std_param"):
+            p, top = dist.std_param, cap
+        elif hasattr(dist, "log_std_param"):
+            p, top = dist.log_std_param, math.log(cap)
+        else:
+            return
+        m = mask.to(p.device)
+        p[m] = p[m].clamp(max=top)
+
+
+def action_std(policy) -> torch.Tensor | None:
+    """(num_actions,) std of a state-independent Gaussian policy, from its parameter (output_std is batch-shaped)."""
+    dist = getattr(policy, "distribution", None)
+    if hasattr(dist, "std_param"):
+        return dist.std_param.detach()
+    if hasattr(dist, "log_std_param"):
+        return dist.log_std_param.detach().exp()
+    return None
+
+
 def train(env, args, *, tag: str, hidden_dims, export: Callable | None = None, video: VideoMaker | None = None,
-          artifact: str | None = None, artifact_meta: dict | None = None, ppo: dict | None = None) -> Path:
+          evaluate: Callable | None = None, artifact: str | None = None, artifact_meta: dict | None = None,
+          ppo: dict | None = None) -> Path:
     """Run PPO on env with the flags of add_arguments; returns the run folder.
 
     export(checkpoint_path, out_path) writes the firmware file; artifact: W&B artifact name for the final
-    deploy.bin + checkpoint."""
+    deploy.bin + checkpoint.  evaluate(policy, it) -> {name: number}: run every --eval-every-min minutes with the
+    deterministic policy (no action noise), logged at that iteration.  An env with locked_actions() -> (num_actions,)
+    bool gets the std of those outputs held at --init-std."""
     from rsl_rl.runners import OnPolicyRunner
 
     if not args.no_wandb:
@@ -207,11 +246,20 @@ def train(env, args, *, tag: str, hidden_dims, export: Callable | None = None, v
             print(f"[{tag}] curriculum restored: {infos['curriculum']}", flush=True)
         print(f"[{tag}] continuing at iteration {runner.current_learning_iteration}", flush=True)
 
+    def hold_std():
+        if hasattr(env, "locked_actions"):
+            hold_locked_std(runner.alg.get_policy(), env.locked_actions(), args.init_std)
+
+    hold_std()  # a resumed run: before its first rollout
+
     budget_min = max(args.max_minutes, 60.0 * args.hours)
     t0 = time.time()
-    state = {"last_save": t0, "last_video": t0, "reason": None, "sigint": False, "run_id": None}
+    state = {"last_save": t0, "last_video": t0, "last_eval": t0, "reason": None, "sigint": False, "run_id": None}
     if args.first_video_min > 0:  # an early video proves the video path works
         state["last_video"] = t0 - max(args.video_every_min - args.first_video_min, 0.0) * 60
+    eval_every = getattr(args, "eval_every_min", 0.0) if evaluate is not None else 0.0
+    if eval_every > 0 and getattr(args, "first_eval_min", 0.0) > 0:  # an early one: the start value, the path works
+        state["last_eval"] = t0 - max(eval_every - args.first_eval_min, 0.0) * 60
 
     # every checkpoint also as the firmware's file, uploaded next to it; the env's curriculum goes inside
     save = runner.save
@@ -243,6 +291,24 @@ def train(env, args, *, tag: str, hidden_dims, export: Callable | None = None, v
         if path:
             print(f"[video] {path.name}", flush=True)
 
+    def run_eval(it):
+        policy = runner.get_inference_policy(device=str(env.device))
+        t = time.time()
+        try:
+            results = evaluate(policy, it)
+        except Exception as exc:  # an evaluation must never end a training
+            print(f"[eval] failed: {type(exc).__name__}: {exc}", flush=True)
+            results = {}
+        finally:
+            runner.alg.train_mode()
+        results = {**results, "Eval/seconds": time.time() - t}
+        writer = runner.logger.writer
+        if writer is not None:
+            for k, v in results.items():
+                writer.add_scalar(k, float(v), it)
+        print(f"[eval] it {it}: " + ", ".join(f"{k.split('/')[-1]} {float(v):.3g}" for k, v in results.items()),
+              flush=True)
+
     # videos and time-based checkpoints just before / after the logger (it uploads the new MP4s of this iteration)
     log = runner.logger.log
 
@@ -261,6 +327,15 @@ def train(env, args, *, tag: str, hidden_dims, export: Callable | None = None, v
         if by_it or by_min or (stopping and it > 0 and (args.video_every or args.video_every_min)):
             make_video(it)
             state["last_video"] = time.time()
+        if eval_every > 0 and it > 0 and ((now - state["last_eval"]) / 60 >= eval_every or stopping):
+            run_eval(it)
+            state["last_eval"] = time.time()
+        hold_std()  # after this iteration's update, before the next rollout
+        if hasattr(env, "locked_actions") and runner.logger.writer is not None:
+            free = ~env.locked_actions()
+            std = action_std(runner.alg.get_policy())
+            if std is not None and bool(free.any()) and std.numel() == free.numel():  # mean_std counts locked ones
+                runner.logger.writer.add_scalar("Policy/std_free_outputs", float(std[free.to(std.device)].mean()), it)
         if state["run_id"] is None and not args.no_wandb:
             try:
                 import wandb

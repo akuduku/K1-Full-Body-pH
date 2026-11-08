@@ -59,16 +59,22 @@ def main():
     ap.add_argument("--gain-scale", type=float, default=None,
                     help="the gain curriculum the policy was trained to (default: from a model_<it>.pt, else 1)")
     args = ap.parse_args()
-    gain_scale = args.gain_scale
-    if gain_scale is None:
-        gain_scale = 1.0
-        if args.policy.endswith(".pt"):
-            try:
-                gain_scale = float(torch.load(args.policy, map_location="cpu", weights_only=False)["infos"]
-                                   ["curriculum"].get("gain_scale", 1.0))
-            except Exception:  # noqa: BLE001  (an older checkpoint: the full gain range)
-                pass
-    print(f"gain scale {gain_scale:g} (0: the agent's fixed gains, 1: x2^+-{C.GAIN_RANGE:g})")
+    # how the policy was trained: from its checkpoint (a deploy_<it>.bin: the model_<it>.pt next to it, if there)
+    ck = Path(args.policy)
+    if ck.suffix == ".bin":
+        ck = ck.with_name(ck.stem.replace("deploy", "model") + ".pt")
+    cur = {}
+    if ck.suffix == ".pt" and ck.exists():
+        try:
+            cur = torch.load(ck, map_location="cpu", weights_only=False)["infos"]["curriculum"] or {}
+        except Exception:  # noqa: BLE001  (an older checkpoint: the full gain range, tank on, raw last action)
+            cur = {}
+    gain_scale = float(cur.get("gain_scale", 1.0)) if args.gain_scale is None else args.gain_scale
+    locked = gain_scale <= 0.0
+    tank_on = not args.no_tank and not (cur.get("tank_with_gains", False) and locked)
+    masked = bool(cur.get("mask_locked_gains", False)) and locked
+    print(f"gain scale {gain_scale:g} (0: the agent's fixed gains, 1: x2^+-{C.GAIN_RANGE:g}), tank "
+          f"{'on' if tank_on else 'off'}, gain outputs {'masked' if masked else 'raw'} in the observation")
 
     model = load_k1()  # float64 CPU: tables, ranges, motor constants
     mot = build_motors(model)
@@ -150,7 +156,7 @@ def main():
         return all(foot.values()), other, robot_robot
 
     T = lambda x: torch.as_tensor(np.asarray(x, dtype=np.float64))[None]  # noqa: E731
-    tank = EnergyTank(1, C.NJ, torch.float64, "cpu", args.tank_capacity, enabled=not args.no_tank)
+    tank = EnergyTank(1, C.NJ, torch.float64, "cpu", args.tank_capacity, enabled=tank_on)
     tank.reset(torch.arange(1), T(d.qpos[7:]), T(kp_ref), T(kd_ref))
     last_target = T(d.qpos[7:])
     line = deque([(d.qpos[7:].copy(), kp_ref.copy(), kd_ref.copy())] * lag, maxlen=lag + 1)
@@ -174,7 +180,7 @@ def main():
         theta, qd = T(d.qpos[7:]), T(d.qvel[6:])
         gyro, quat = T(d.qvel[3:6]), T(d.qpos[3:7])  # MuJoCo free joint: angular velocity in the body frame
         g = con.projected_gravity(quat)
-        obs = con.observe(gyro, g, theta, qd, last_action, tank.fraction())
+        obs = con.observe(gyro, g, theta, qd, last_action, tank.fraction(), masked)
         action = torch.as_tensor(policy(obs.numpy()))
         last_action = action
         target, kp, kd = con.decode(action, gain_scale)
@@ -222,7 +228,7 @@ def main():
                   f"potential energy gained {dv:.0f} J (efficiency {dv / max(battery_at_stand, 1e-6):.0%})")
     print(f"battery over the run {battery:.0f} J (est., the plant's motor constants), controller injection {injected:.0f} J, "
           f"tank limited {limited} of {steps} steps, self-contact in {self_contact_steps} of {steps} policy steps, "
-          f"delay {args.delay_ms:g} ms, tank {'off' if args.no_tank else f'{args.tank_capacity:g} J'}")
+          f"delay {args.delay_ms:g} ms, tank {f'{args.tank_capacity:g} J' if tank_on else 'off'}")
     if self_pairs:
         print("touching body pairs (MuJoCo steps): " + ", ".join(f"{k} {v}" for k, v in self_pairs.most_common(12)))
     if renderer is not None and frames:

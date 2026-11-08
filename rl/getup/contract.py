@@ -62,8 +62,14 @@ class Contract:
         w, x, y, z = quat.unbind(-1)
         return torch.stack((-2 * (x * z - w * y), -2 * (y * z + w * x), -(1 - 2 * (x * x + y * y))), -1)
 
-    def observe(self, gyro, gravity, theta, qd, last_action, tank_fraction) -> torch.Tensor:
-        """117 inputs: gyro | gravity | theta - HOME | qd | last action (66, raw policy output) | tank level / capacity."""
+    def observe(self, gyro, gravity, theta, qd, last_action, tank_fraction, gains_locked: bool = False) -> torch.Tensor:
+        """117 inputs: gyro | gravity | theta - HOME | qd | last action (66, raw policy output) | tank level / capacity.
+
+        gains_locked: the 44 gain outputs read 0 in the last action (they act on nothing while gain_scale is 0).
+        A policy trained with GetUpConfig.mask_locked_gains at gain_scale 0 must be observed this way, also on the
+        robot; older policies (getup-mb-v1d and before) saw the raw outputs."""
+        if gains_locked:
+            last_action = torch.cat((last_action[:, :NJ], torch.zeros_like(last_action[:, NJ:])), -1)
         return torch.cat((gyro, gravity, theta - self.home, qd, last_action, tank_fraction[:, None]), -1)
 
     def decode(self, actions: torch.Tensor, gain_scale: float = 1.0):

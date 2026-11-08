@@ -12,7 +12,8 @@ checkpoint every --save-every-min minutes (a disconnect loses at most that), a v
 
 W&B: project "Akos pH GetUp" (entity WANDB_ENTITY), run = --run-name.  Logged: losses, reward terms, success per
 start kind, time to stand, battery energy per get-up and its efficiency (potential energy gained / battery
-energy), standing power, tank level and use, curriculum, videos (get-ups from the back and the front, alternating,
+energy), standing power, tank level and use, curriculum, every 30 min the success WITHOUT action noise (Eval/*,
+rl/getup/evaluate.py: what the robot would do), videos (get-ups from the back and the front, alternating,
 without the assist), every checkpoint with its firmware file deploy_<it>.bin, at the end the artifact
 "k1-getup-ph".  The harness is rl/common/harness.py, the task rl/getup/env.py.
 """
@@ -35,6 +36,7 @@ import torch  # noqa: E402
 from rl.common import harness as H  # noqa: E402
 from rl.getup import contract as C  # noqa: E402
 from rl.getup.env import REWARDS, GetUpConfig, GetUpEnv  # noqa: E402
+from rl.getup.evaluate import NoNoiseEval  # noqa: E402
 from rl.getup.export import export_bin  # noqa: E402
 
 
@@ -51,8 +53,15 @@ def parse_rewards(items) -> dict:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     H.add_arguments(ap, run_prefix="getup-ph", wandb_project="Akos pH GetUp", iterations=100000, save_every=0,
-                    video_every=0, save_every_min=10.0, video_every_min=30.0, init_std=0.8)
+                    video_every=0, save_every_min=10.0, video_every_min=30.0, init_std=0.8, eval_every_min=30.0,
+                    first_eval_min=3.0)
     ap.add_argument("--no-tank", action="store_true", help="ablation: variable gains without the energy tank")
+    ap.add_argument("--tank-from-start", action="store_true",
+                    help="the tank acts from the start, also with the fixed gains (runs up to getup-mb-v1d)")
+    ap.add_argument("--unmask-locked-gains", action="store_true",
+                    help="the locked gain outputs stay in the observed last action (runs up to getup-mb-v1d)")
+    ap.add_argument("--eval-robots", type=int, default=64,
+                    help="robots of the no-noise evaluation on the CPU, half per lying kind (0: off)")
     ap.add_argument("--tank-capacity", type=float, default=150.0, help="J")
     ap.add_argument("--tank-refill", type=float, default=1.0)
     ap.add_argument("--assist-n", type=float, default=100.0, help="upward assist on lying starts, fading (0: off)")
@@ -76,10 +85,12 @@ def main():
                       lying_kinds=tuple(k.strip() for k in args.lying_kinds.split(",") if k.strip()),
                       push_dv=args.push_dv, library_rounds=args.library_rounds, rewards=parse_rewards(args.reward),
                       energy_scale_lo=args.energy_scale_lo, self_collision=not args.no_self_collision,
-                      gain_free_ema=None if args.gain_free_ema < 0 else args.gain_free_ema)
+                      gain_free_ema=None if args.gain_free_ema < 0 else args.gain_free_ema,
+                      tank_with_gains=not args.tank_from_start, mask_locked_gains=not args.unmask_locked_gains)
     env = GetUpEnv(cfg)
+    tank = "off" if args.no_tank else f"{args.tank_capacity:g} J" + ("" if args.tank_from_start else " once gains unlock")
     print(f"[getup] {args.num_envs} robots on {args.device}, stand trunk z {env.stand_z:.3f} m, CoM {env.com_low:.3f} "
-          f"-> {env.com_stand:.3f} m, tank {'off' if args.no_tank else f'{args.tank_capacity:g} J'}, assist "
+          f"-> {env.com_stand:.3f} m, tank {tank}, assist "
           f"{args.assist_n:g} N, budget {max(args.hours, args.max_minutes / 60):.2f} h, "
           f"logs -> {Path(args.log_root) / args.run_name}", flush=True)
 
@@ -89,17 +100,24 @@ def main():
         return GetUpEnv(GetUpConfig(**{**cfg.__dict__, "num_envs": 1, "seed": cfg.seed + 1, "library_size": 32,
                                        "assist_force": 0.0, "push_dv": 0.0, "obs_noise": {}, "device": "cpu"}))
 
+    def eval_env():  # on the CPU, as the video env; the same randomisation, no assist, no pushes
+        return GetUpEnv(GetUpConfig(**{**cfg.__dict__, "num_envs": args.eval_robots, "seed": cfg.seed + 2,
+                                       "library_size": 2 * args.eval_robots, "assist_force": 0.0, "push_dv": 0.0,
+                                       "device": "cpu"}))
+
+    evaluate = NoNoiseEval(eval_env, env) if args.eval_robots > 0 else None
     kinds = cfg.lying_kinds
 
     def prepare(venv, it):  # alternate the lying starts (back, front, ...); the assist stays off
         venv.cfg.start = kinds[prepare.n % len(kinds)]
         prepare.n += 1
         venv._reset_idx(torch.arange(1, device=venv.device))
+        venv.load_curriculum_state(env.curriculum_state())  # the training's gain scale (decode) and tank switch
     prepare.n = 0
 
     video = H.VideoMaker(video_env, args.video_seconds, cfg.policy_dt, Path(args.log_root) / args.run_name / "videos",
                          "getup", prepare)
-    H.train(env, args, tag="getup", hidden_dims=C.HIDDEN_DIMS, export=export_bin, video=video,
+    H.train(env, args, tag="getup", hidden_dims=C.HIDDEN_DIMS, export=export_bin, video=video, evaluate=evaluate,
             artifact="k1-getup-ph", artifact_meta={"agent": "standup_ph", "obs_dim": C.OBS_DIM,
                                                    "num_actions": C.NUM_ACTIONS})
 

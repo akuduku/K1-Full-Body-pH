@@ -45,6 +45,8 @@ Default capacity 150 J; `--no-tank` is the ablation.
   - the **variable gains** start locked: until both lying starts succeed 50 % of the time the driver gets the
     agent's fixed kKp / kKd (as the stock StandupAgent and RL_Core's get-up recipe), then the 44 gain outputs ramp
     in over 500 iterations (`gain_scale` 0 → 1, in the checkpoint; the action-rate penalty on them ramps with it);
+    while they are locked, the gain outputs read 0 in the observed last action and their std is held at the start
+    value (0.8), and the **tank** only measures (it acts from `gain_scale` > 0 on: it exists for the variable gains);
   - the **costs of moving** (battery and impacts) grow from ×0 to ×1 as the success goes from 50 % to 90 %: get up
     first, then cheaply.
   - Why (runs getup-ph-v1 and getup-ph-notank-v1, 2026-11-01/02): with the battery term at ×0.25 from the start and
@@ -52,6 +54,12 @@ Default capacity 150 J; `--no-tank` is the ablation.
     get-up attempt was larger than the height and upright rewards (episode sums −22 vs +9), so the policy learnt
     to go limp lying down: stiffness ×0.4, battery 350 → 16 W. The standing starts stayed up (100 %). The tank
     never limited anything. Old behaviour: `--energy-scale-lo 0.25 --gain-free-ema -1`.
+  - Why the locked outputs and the tank (getup-mb-v1d, 2026-11-06): the 44 locked gain outputs got std 3.4 (the
+    entropy bonus raised it, nothing in the return pulled it back) and that noise reached the input through the
+    last action. With the tank on from the start, the policy got up from the front in 95 % of the training
+    episodes but only in 12 % without its action noise (the tank ran dry; noise refills it through the dampers).
+    Without the tank, the same checkpoint stood up from the front in 78–97 % without noise. Old behaviour:
+    `--tank-from-start --unmask-locked-gains`.
 - **Rewards:**
 
 | term | weight | from |
@@ -75,6 +83,10 @@ Default capacity 150 J; `--no-tank` is the ablation.
   - standing power (W);
   - tank level, injection and how often it limits;
   - curriculum;
+  - every 30 min (first after 3 min) the **success without action noise** (`Eval/*`, `rl/getup/evaluate.py`):
+    the deterministic policy, what the robot runs, on 64 CPU robots from the back and the front, without assist
+    and pushes. `Metrics/success_*` is the stochastic training policy and can be far higher;
+  - `Policy/std_free_outputs`: the action std of the outputs that act (`Policy/mean_std` also counts the locked ones);
   - videos of get-ups from the back and the front, without the assist.
 
 ## Train on free Colab, by time
@@ -121,13 +133,15 @@ gains once before the control loop (`kp_run = agent->kp()`, main.cpp:897). A new
 `StandupAgent` in `src/agents/sprint.cpp`, needs to:
 
 1. **Observe 117 values:** `SprintAgent::observe`'s first 72 values (raw gyro, gravity, `q − kHome`, raw `q̇`)
-   with the last action extended to 66, plus the tank level / capacity.
+   with the last action extended to 66, plus the tank level / capacity. A policy that ended its training with
+   `gain_scale` 0 and `mask_locked_gains` (both in the checkpoint) sees 0 in place of the 44 gain outputs.
 2. **Decode 66 outputs:**
    - targets `kHome + 0.25·kEffort/kKp·a[0:22]`;
    - `kp = kKp·2^(1.5·s·tanh a[22:44])`;
    - `kd = kKd·2^(1.5·s·tanh a[44:66])`, with `s` = the policy's `gain_scale` at the end of its training (1 once
      the gain curriculum has finished; 0 = fixed gains).
-3. **Run the tank of `impedance.py` once per 20 ms:**
+3. **Run the tank of `impedance.py` once per 20 ms** (with `tank_with_gains` in the checkpoint: only once
+   `gain_scale` > 0; at 0 it is the stock fixed-gain agent):
    - refill `Σ kd q̇² dt`;
    - injection `S(new) − S(old)` at the measured q, with the target after `apply_safety`;
    - scale back with α if the tank can't pay.
