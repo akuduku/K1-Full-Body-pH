@@ -220,13 +220,14 @@ def action_std(policy) -> torch.Tensor | None:
 
 def train(env, args, *, tag: str, hidden_dims, export: Callable | None = None, video: VideoMaker | None = None,
           evaluate: Callable | None = None, artifact: str | None = None, artifact_meta: dict | None = None,
-          ppo: dict | None = None) -> Path:
+          ppo: dict | None = None, before_learn: Callable | None = None) -> Path:
     """Run PPO on env with the flags of add_arguments; returns the run folder.
 
     export(checkpoint_path, out_path) writes the firmware file; artifact: W&B artifact name for the final
     deploy.bin + checkpoint.  evaluate(policy, it) -> {name: number}: run every --eval-every-min minutes with the
     deterministic policy (no action noise), logged at that iteration.  An env with locked_actions() -> (num_actions,)
-    bool gets the std of those outputs held at --init-std."""
+    bool gets the std of those outputs held at --init-std.  before_learn(runner, resumed: bool): called once after
+    the runner is built (and a checkpoint loaded), before PPO starts, e.g. to warm-start the actor by imitation."""
     from rsl_rl.runners import OnPolicyRunner
 
     if not args.no_wandb:
@@ -251,6 +252,8 @@ def train(env, args, *, tag: str, hidden_dims, export: Callable | None = None, v
             hold_locked_std(runner.alg.get_policy(), env.locked_actions(), args.init_std)
 
     hold_std()  # a resumed run: before its first rollout
+    if before_learn is not None:
+        before_learn(runner, bool(args.resume))
 
     budget_min = max(args.max_minutes, 60.0 * args.hours)
     t0 = time.time()

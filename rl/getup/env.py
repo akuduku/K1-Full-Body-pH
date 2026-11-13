@@ -154,6 +154,9 @@ class GetUpConfig:
 
 
 class GetUpEnv(VecEnv):
+    # reward terms a subclass adds (its _terms returns them, its _reward_scale may weight them by a curriculum)
+    EXTRA_REWARDS: tuple = ()
+
     def __init__(self, cfg: GetUpConfig | None = None):
         self.cfg = cfg = cfg or GetUpConfig()
         torch.manual_seed(cfg.seed)
@@ -163,7 +166,7 @@ class GetUpEnv(VecEnv):
         self.num_actions = C.NUM_ACTIONS
         self.max_episode_length = int(round(cfg.episode_s / cfg.policy_dt))
         self.substeps = int(round(cfg.policy_dt / cfg.plant_dt))
-        unknown = set(cfg.rewards) - set(REWARDS)
+        unknown = set(cfg.rewards) - set(REWARDS) - set(self.EXTRA_REWARDS)
         if unknown:
             raise KeyError(f"unknown reward terms {sorted(unknown)}; known: {sorted(REWARDS)}")
 
@@ -443,6 +446,14 @@ class GetUpEnv(VecEnv):
         return f
 
     # ----------------------------------------------------------------- terms
+    def _reward_scale(self, name: str) -> float:
+        """The curriculum weight of a reward term (energy and head terms ramp in; the rest count fully)."""
+        if name in ENERGY_TERMS:
+            return self.energy_scale
+        if name in HEAD_TERMS:
+            return self.head_scale
+        return 1.0
+
     def _terms(self, info, target_raw, P, d_supplied, d_contact, d_stops) -> dict:
         m, c, q = self.model, self.cfg, self.plant.q
         dt = c.policy_dt
@@ -563,8 +574,7 @@ class GetUpEnv(VecEnv):
         terms = self._terms(info, target_raw, P, d_supplied, d_contact, d_stops)
         reward = torch.zeros(self.num_envs, dtype=self.dtype, device=self.device)
         for k, w in c.rewards.items():
-            scale = self.energy_scale if k in ENERGY_TERMS else (self.head_scale if k in HEAD_TERMS else 1.0)
-            v = torch.nan_to_num(w * scale * terms[k] * dt, nan=0.0, posinf=0.0, neginf=0.0)
+            v = torch.nan_to_num(w * self._reward_scale(k) * terms[k] * dt, nan=0.0, posinf=0.0, neginf=0.0)
             self.episode_sums[k] += v
             reward += v
 
