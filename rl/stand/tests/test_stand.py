@@ -164,3 +164,36 @@ def test_mouse_force_is_a_spring_on_the_pulled_point():
     # J^T f: the trunk's linear row (body frame) carries the force, its vertical part equals 20 N at rest pose
     R0 = kin.R[0, 0]
     assert torch.allclose(R0 @ g1[0, 3:6], torch.tensor([0, 0, 20.0], dtype=torch.float64), atol=1e-9)
+
+
+def test_snapshot_restores_the_exact_state():
+    """A second env restored from a snapshot continues exactly as the first: the planner branches rollouts this way."""
+    pytest.importorskip("tensordict")
+    from rl.stand.env import StandConfig, StandEnv
+
+    def make(seed):
+        return StandEnv(StandConfig(num_envs=4, device=DEVICE, dtype="float64", seed=seed, push_dv=0.0, obs_noise={},
+                                    delay_hold_prob=None))
+
+    a, b = make(1), make(2)
+    torch.manual_seed(0)
+    for _ in range(15):
+        a.step(0.3 * torch.randn(4, 22, dtype=torch.float64, device=a.device))
+    b.restore(a.snapshot())
+    assert torch.equal(a.get_observations()["critic"], b.get_observations()["critic"])
+    alive = torch.ones(4, dtype=torch.bool, device=a.device)   # a reset draws a new random start pose: compare until then
+    for _ in range(25):
+        act = 0.5 * torch.randn(4, 22, dtype=torch.float64, device=a.device)
+        oa, ra, da, _ = a.step(act)
+        ob, rb, db, _ = b.step(act)
+        assert torch.equal(ra[alive], rb[alive]) and torch.equal(da[alive], db[alive])
+        alive &= ~da.bool()
+        assert torch.equal(oa["critic"][alive], ob["critic"][alive])
+    assert alive.any()
+    assert torch.equal(a.plant.q[alive], b.plant.q[alive])
+    assert torch.equal(a.plant.ledger.supplied[alive], b.plant.ledger.supplied[alive])
+    # rows: robot 2 of a into robots 0 and 3 of b
+    snap = a.snapshot(torch.tensor([2, 2], device=a.device))
+    b.restore(snap, torch.tensor([0, 3], device=b.device))
+    assert torch.equal(b.plant.q[0], a.plant.q[2]) and torch.equal(b.plant.q[3], a.plant.q[2])
+    assert torch.equal(b.actions[3], a.actions[2]) and torch.equal(b.plant.ring[0], a.plant.ring[2])

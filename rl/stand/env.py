@@ -252,6 +252,33 @@ class StandEnv(VecEnv):
         self.extras = {"time_outs": timeout, "log": log}
         return self.get_observations(), reward, dones, self.extras
 
+    # ------------------------------------------------------------ snapshots
+    STATE = ("actions", "prev_actions", "qd", "prev_qd", "gyro", "v_body", "contact", "kp", "kd", "push_timer",
+             "episode_length_buf")
+
+    def snapshot(self, rows: torch.Tensor | None = None) -> dict:
+        """A copy of the robots' state (plant, command path and this env's buffers), of all robots or of `rows`."""
+        take = lambda t: (t if rows is None else t[rows]).clone()  # noqa: E731
+        return {"plant": self.plant.snapshot(rows), "env": {k: take(getattr(self, k)) for k in self.STATE},
+                "sums": {k: take(v) for k, v in self.episode_sums.items()}}
+
+    def restore(self, snap: dict, rows: torch.Tensor | None = None) -> None:
+        """Put a snapshot back: row i goes to robot rows[i] (all robots without rows).  The env continues exactly as
+        the one the snapshot came from, if nothing random is switched on (noise, pushes, delay_hold_prob)."""
+        self.plant.restore(snap["plant"], rows)
+        for k, v in snap["env"].items():
+            t = getattr(self, k)
+            v = v.to(device=t.device, dtype=t.dtype)
+            if rows is None:
+                setattr(self, k, v.clone())
+            else:
+                t[rows] = v
+        for k, v in snap["sums"].items():
+            if rows is None:
+                self.episode_sums[k] = v.clone()
+            else:
+                self.episode_sums[k][rows] = v
+
     def config_dict(self) -> dict:
         d = asdict(self.cfg)
         d["contract"] = {"agent": "stand", "gains": C.GAINS, "obs_dim": C.OBS_DIM, "hidden_dims": list(C.HIDDEN_DIMS),

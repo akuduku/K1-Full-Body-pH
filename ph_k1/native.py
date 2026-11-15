@@ -115,6 +115,34 @@ class K1PHPlantNative(K1PHPlant):
             self.ring_kp[env_ids] = kp0[env_ids][:, None, :]
             self.ring_kd[env_ids] = kd0[env_ids][:, None, :]
 
+    # ------------------------------------------------------------ snapshots
+    # everything a step reads and changes: the plant's state, the ledger and the command path
+    SNAPSHOT = ("q", "p", "xi", "lam", "ball", "_led", "last_target", "ring", "ring_idx", "lag", "ring_kp", "ring_kd")
+
+    def snapshot(self, rows: torch.Tensor | None = None) -> dict:
+        """A copy of the state of all robots (or of `rows`): restore() on a plant with the same settings continues
+        exactly as this one would.  Used to branch rollouts from a robot's state (model-based planning)."""
+        self._prepare()
+        out = {}
+        for name in self.SNAPSHOT:
+            t = getattr(self, name, None)
+            if t is not None:
+                out[name] = (t if rows is None else t[rows]).clone()
+        return out
+
+    def restore(self, snap: dict, rows: torch.Tensor | None = None) -> None:
+        """Put a snapshot back (into `rows`, or into all robots): row i of the snapshot goes to robot rows[i]."""
+        self._prepare()
+        for name, value in snap.items():
+            t = getattr(self, name)
+            value = value.to(device=t.device, dtype=t.dtype)
+            if rows is None:
+                if value.shape != t.shape:
+                    raise ValueError(f"snapshot {name} {tuple(value.shape)} does not fit this plant {tuple(t.shape)}")
+                t.copy_(value)
+            else:
+                t[rows] = value
+
     def set_delay(self, lo_ms: float, hi_ms: float | None = None, env_ids=None) -> None:
         """Draw the transport delay of the robots (all, or env_ids) uniformly in [lo_ms, hi_ms]."""
         hi_ms = lo_ms if hi_ms is None else hi_ms
