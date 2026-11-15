@@ -36,6 +36,7 @@ from . import firmware as fw
 from .dynamics import GRAVITY
 from .model import NJ, NV
 from .plant import K1PHPlant, Ledger, StepInfo
+from .ball import build_boxes
 from .self_contact import build_geometry
 
 NATIVE_DIR = Path(__file__).resolve().parents[1] / "ph_k1_cuda"
@@ -126,7 +127,7 @@ class K1PHPlantNative(K1PHPlant):
 
     def _prepare(self) -> None:
         """State tensors contiguous, with the plant's dtype/device (assignments like pl.p = ... are allowed)."""
-        for name in ("q", "p", "xi", "lam", "last_target", "ring", "ring_kp", "ring_kd"):
+        for name in ("q", "p", "xi", "lam", "last_target", "ring", "ring_kp", "ring_kd", "ball"):
             t = getattr(self, name, None)
             if t is None:
                 continue
@@ -142,6 +143,7 @@ class K1PHPlantNative(K1PHPlant):
         key = (
             id(self.model), self.h, self.fixed_base, self.motors_connected, self.gravity, self.dtype, self.device,
             dataclasses.astuple(self.contact), dataclasses.astuple(self.limits), dataclasses.astuple(self.self_contact),
+            dataclasses.astuple(self.ball_params),
             mot.v_max,
             tuple((id(t), t._version) for t in (mot.k, mot.R, mot.L, mot.tau_max, mot.damping)),
             cfg.pos_clamp, cfg.slew, cfg.target_clamp, cfg.overspeed_guard, cfg.policy_dt, fw.effort_limit(cfg),
@@ -164,13 +166,18 @@ class K1PHPlantNative(K1PHPlant):
             g = build_geometry(m)
             tensors.update(sphere_body=T(g.body), sphere_pos=T(g.pos), sphere_r=T(g.radius), pair_a=T(g.pair_a),
                            pair_b=T(g.pair_b))
-            scalars = {"h": self.h, "lim_k": lim.k, "lim_c": lim.c, "k_n": c.k_n, "c_n": c.c_n, "k_t": c.k_t,
+            bp, boxes = self.ball_params, build_boxes(m)
+            tensors.update(box_body=T(boxes.body), box_pos=T(boxes.pos), box_rot=T(boxes.rot), box_half=T(boxes.half))
+            scalars = {"ball_r": bp.radius, "ball_m": bp.mass, "ball_I": bp.inertia, "ball_k": bp.k, "ball_c": bp.c,
+                       "ball_kg": bp.k_ground, "ball_cg": bp.c_ground, "ball_mu": bp.mu, "ball_roll": bp.roll, "ball_mu_robot": bp.mu_robot,
+                       "h": self.h, "lim_k": lim.k, "lim_c": lim.c, "k_n": c.k_n, "c_n": c.c_n, "k_t": c.k_t,
                        "c_t": c.c_t, "mu": c.mu, "v_max": float(mot.v_max), "policy_dt": cfg.policy_dt,
                        "self_k": sc.k, "self_c": sc.c}
             ints = {"nbody": m.nbody, "ncontact": m.ncontact, "fixed_base": int(self.fixed_base),
                     "motors_connected": int(self.motors_connected), "gravity": int(self.gravity),
                     "contact_enabled": int(c.enabled), "limits_enabled": int(lim.enabled),
                     "self_enabled": int(sc.enabled), "nsphere": g.nsphere, "npair": g.npair,
+                    "ball_enabled": int(bp.enabled), "nbox": boxes.nbox,
                     "fw_pos_clamp": int(cfg.pos_clamp), "fw_slew": int(cfg.slew),
                     "fw_target_clamp": int(cfg.target_clamp), "fw_overspeed": int(cfg.overspeed_guard)}
             block = self._native.pack_model(tensors, scalars, ints, self.dtype == torch.float64)
@@ -211,6 +218,10 @@ class K1PHPlantNative(K1PHPlant):
             return None
         return torch.as_tensor(gen_force, dtype=self.dtype, device=self.device).expand(self.B, NV).contiguous()
 
+    def _ball(self):
+        """plant.ball (B, 9), updated in place by the C++ step; None without a ball."""
+        return self.ball if self.ball_params.enabled else None
+
     def _robot_rows(self):
         """plant.robot_params (B, NRP) as the C++ step reads it, or None (the shared constants)."""
         r = self.robot_params
@@ -228,7 +239,7 @@ class K1PHPlantNative(K1PHPlant):
         self._native.run(self._model_block(), self.q, self.p, self.xi, self.lam, self._led,
                          volts=self._rows(volts), joint_torque=self._rows(joint_torque),
                          trunk_force=self._force(trunk_force), gen_force=self._gen(gen_force),
-                         robot_params=self._robot_rows(), nsub=1, **out)
+                         robot_params=self._robot_rows(), ball=self._ball(), nsub=1, **out)
         self.time += self.h
         return self._info(out)
 
@@ -274,7 +285,7 @@ class K1PHPlantNative(K1PHPlant):
                          push=None if push_dv is None else torch.as_tensor(push_dv, dtype=self.dtype, device=self.device)
                          .expand(self.B, 3).contiguous(),
                          ring_kp=self.ring_kp, ring_kd=self.ring_kd, trunk_force=self._force(trunk_force),
-                         gen_force=self._gen(gen_force), robot_params=self._robot_rows(),
+                         gen_force=self._gen(gen_force), robot_params=self._robot_rows(), ball=self._ball(),
                          nsub=int(substeps), **out)
         self.time += substeps * self.h
         return self._info(out)

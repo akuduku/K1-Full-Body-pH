@@ -75,6 +75,19 @@ struct ModelData {
     T fw_effort[NJ];              // effort_limit (= MJCF forcerange)
     T fw_max_joint_velocity[NJ];  // max_joint_velocity (overspeed guard)
     T fw_max_target_velocity[NJ]; // max_target_velocity (slew)
+
+    // the ball (ph_k1/ball.py): a free sphere per robot against boxes fixed to bodies and against the ground
+    int ball_enabled;
+    int nbox;
+    int box_body[MAX_BALL_BOXES];
+    T box_pos[MAX_BALL_BOXES][3];   // centre in the body frame
+    T box_rot[MAX_BALL_BOXES][9];   // box axes in the body frame, row-major
+    T box_half[MAX_BALL_BOXES][3];
+    T ball_r, ball_m, ball_I;
+    T ball_k, ball_c;               // robot-ball spring and damper
+    T ball_kg, ball_cg;             // ball-ground spring and damper
+    T ball_mu, ball_roll;           // ground friction, rolling resistance
+    T ball_mu_robot;                // robot-ball friction
 };
 
 }  // namespace ph

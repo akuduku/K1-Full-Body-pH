@@ -44,6 +44,8 @@ struct BatchT {
     const T* gen_force = nullptr;
     // both modes: B x NRP per-robot parameter rows (config.hpp RP_*), or null = the ModelData values
     const T* robot_params = nullptr;
+    // both modes: B x NBALL the balls (centre, linear velocity, angular velocity), or null = no ball
+    T* ball = nullptr;
     // outputs
     T* out_nu = nullptr;
     T* out_i = nullptr;
@@ -73,6 +75,7 @@ PH_HD StepIO<T> make_io(const BatchT<T>& b, int r, int nc) {
     io.fext = b.force ? b.force + r * 3 : nullptr;
     io.fgen = b.gen_force ? b.gen_force + r * NV : nullptr;
     io.rp = b.robot_params ? b.robot_params + r * NRP : nullptr;
+    io.ball = b.ball ? b.ball + r * NBALL : nullptr;
     io.out_nu = b.out_nu ? b.out_nu + r * NV : nullptr;
     io.out_i = b.out_i ? b.out_i + r * NJ : nullptr;
     io.out_tau = b.out_tau ? b.out_tau + r * NJ : nullptr;
@@ -89,6 +92,7 @@ PH_HD StepIO<T> make_io(const BatchT<T>& b, int r, int nc) {
 template <class T>
 PH_HD void run_robot(const ModelData<T>& m, const BatchT<T>& b, int r, Work<T>& w) {
     StepIO<T> io = make_io(b, r, m.ncontact);
+    if (!m.ball_enabled) io.ball = nullptr;
     if (!b.policy_target) {
         for (int s = 0; s < b.nsub; ++s) plant_step(m, io, w);
         return;

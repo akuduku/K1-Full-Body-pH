@@ -60,6 +60,7 @@ from .dynamics import (
 from .model import HOME_POSE, NB, NJ, NQ, NV, K1Model, load_k1
 from .motors import MotorBank, build_motors
 from .robot_params import Effective, effective
+from . import ball as bl
 from . import self_contact as sc
 from .spatial import quat_exp, quat_mul, quat_rate_matrix
 
@@ -110,6 +111,7 @@ class K1PHPlant:
         motors: MotorBank | None = None,
         gravity: bool = True,
         self_contact: sc.SelfContactParams | None = None,
+        ball: bl.BallParams | None = None,
     ):
         self.model = model or load_k1()
         m = self.model
@@ -120,6 +122,7 @@ class K1PHPlant:
         self.contact = contact or ContactParams()
         self.limits = limits or LimitParams()
         self.self_contact = self_contact or sc.SelfContactParams()  # off by default (ph_k1/self_contact.py)
+        self.ball_params = ball or bl.BallParams()  # off by default (ph_k1/ball.py)
         self.motors = motors or build_motors(m)
         self.gravity = gravity
         self.dtype, self.device = m.dtype, m.device
@@ -168,6 +171,7 @@ class K1PHPlant:
             self.lam = torch.zeros(B, NJ, dtype=dt, device=dev)
             self.time = 0.0
             self.ledger = Ledger.zeros(B, dt, dev)
+            self.ball = bl.rest_state(self.ball_params, B, dt, dev)  # parked; set_ball puts it into play
             return
         self.q[rows] = q
         self.p[rows] = 0.0
@@ -176,6 +180,22 @@ class K1PHPlant:
         led = self.ledger  # fields are tensors (views of one buffer in K1PHPlantNative): zero their rows in place
         for f in dataclasses.fields(Ledger):
             getattr(led, f.name)[rows] = 0.0
+        self.ball[rows] = bl.rest_state(self.ball_params, n, dt, dev)
+
+    def set_ball(self, xy, velocity=None, env_ids: torch.Tensor | None = None) -> None:
+        """Put the ball on the ground at xy ((2,) or (n,2), world), at rest or with a linear velocity ((3,) or
+        (n,3)); a ball that starts with a horizontal velocity starts rolling without slip."""
+        dev, dt = self.device, self.dtype
+        rows = torch.arange(self.B, device=dev) if env_ids is None else torch.as_tensor(env_ids, device=dev).long().reshape(-1)
+        n = int(rows.numel())
+        b = bl.rest_state(self.ball_params, n, dt, dev)
+        b[:, :2] = torch.as_tensor(xy, dtype=dt, device=dev).expand(n, 2)
+        if velocity is not None:
+            u = torch.as_tensor(velocity, dtype=dt, device=dev).expand(n, 3)
+            b[:, 3:6] = u
+            r = self.ball_params.radius
+            b[:, 6], b[:, 7] = -u[:, 1] / r, u[:, 0] / r
+        self.ball[rows] = b
 
     def _sole_points(self, kin: Kinematics) -> torch.Tensor:
         m = self.model
@@ -206,30 +226,43 @@ class K1PHPlant:
         return self.lam / self.motors.L
 
     # --------------------------------------------------------------- energy
-    def energy(self, kin: Kinematics | None = None) -> dict[str, torch.Tensor]:
-        """The tanks of H.  `total` is H(x)."""
-        kin = kin or self.kinematics()
-        nu = self.velocity(kin)
+    def energy(self, kin: Kinematics | None = None, rows: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+        """The tanks of H.  `total` is H(x).  rows: only these robots (kin, if given, must then be theirs)."""
         c, lim, m = self.contact, self.limits, self.model
         e = self.params()
-        out = {"kinetic": 0.5 * (self.p * nu).sum(-1)}
-        zeros_b = torch.zeros(self.B, dtype=self.dtype, device=self.device)
+        k_n, k_t = e.k_n, e.k_t
+        q, p, xi, lam, ball = self.q, self.p, self.xi, self.lam, self.ball
+        if rows is not None:
+            q, p, xi, lam, ball = q[rows], p[rows], xi[rows], lam[rows], ball[rows]
+            if isinstance(k_n, torch.Tensor):
+                k_n, k_t = k_n[rows], k_t[rows]
+        kin = kin or forward_kinematics(m, q)
+        f = self.free
+        nu = torch.zeros_like(p)
+        nu[:, f] = torch.linalg.solve(kin.M[:, f][:, :, f], p[:, f])
+        theta = q[:, 7:]
+        out = {"kinetic": 0.5 * (p * nu).sum(-1)}
+        zeros_b = torch.zeros(q.shape[0], dtype=self.dtype, device=self.device)
         out["gravity"] = gravity_potential(m, kin) if self.gravity else zeros_b
         if c.enabled and not self.fixed_base:
             delta = (-self._sole_points(kin)[..., 2]).clamp_min(0)
-            out["contact"] = (0.5 * _per_robot(e.k_n) * (delta**2).sum(-1)
-                              + 0.5 * _per_robot(e.k_t) * (self.xi**2).sum((-1, -2)))
+            out["contact"] = (0.5 * _per_robot(k_n) * (delta**2).sum(-1)
+                              + 0.5 * _per_robot(k_t) * (xi**2).sum((-1, -2)))
         else:
             out["contact"] = zeros_b
         if self.self_contact.enabled:
             out["contact"] = out["contact"] + sc.potential(self.self_contact, sc.build_geometry(m), kin)
         if lim.enabled:
-            over = (self.theta - m.stop_high).clamp_min(0) + (m.stop_low - self.theta).clamp_min(0)
+            over = (theta - m.stop_high).clamp_min(0) + (m.stop_low - theta).clamp_min(0)
             out["stops"] = 0.5 * lim.k * (over**2).sum(-1)
         else:
             out["stops"] = zeros_b
-        out["coil"] = (self.lam**2 / (2 * self.motors.L)).sum(-1)
-        out["total"] = sum(out[k] for k in ("kinetic", "gravity", "contact", "stops", "coil"))
+        out["coil"] = (lam**2 / (2 * self.motors.L)).sum(-1)
+        if self.ball_params.enabled:
+            out["ball"] = bl.energy(self.ball_params, bl.build_boxes(m), kin, ball, self.gravity)
+        else:
+            out["ball"] = zeros_b
+        out["total"] = sum(out[k] for k in ("kinetic", "gravity", "contact", "stops", "coil", "ball"))
         return out
 
     # ------------------------------------------------------------------ step
@@ -284,6 +317,19 @@ class K1PHPlant:
             Js = sc.jacobian(sc.build_geometry(m), kin, s_state)                 # (B,P,28)
             cs_eff = sp.c + h * sp.k
 
+        # the ball against feet and shanks and against the ground (ph_k1/ball.py): implicit, below
+        use_ball = self.ball_params.enabled
+        if use_ball:
+            bp = self.ball_params
+            bx, bu, bom = self.ball[:, 0:3], self.ball[:, 3:6], self.ball[:, 6:9]
+            b_state = bl.pair_state(bl.build_boxes(m), kin, bx, bp.radius)
+            Jb = bl.jacobian(bl.build_boxes(m), kin, b_state)                    # (B,nb,28)
+            cb_eff, cg_eff = bp.c + h * bp.k, bp.c_ground + h * bp.k_ground
+            dg = bl.ground_overlap(bp, bx)
+            g_vec = bl.gravity_vector(self.dtype, self.device) if self.gravity else torch.zeros(3, dtype=self.dtype, device=self.device)
+            eye3 = torch.eye(3, dtype=self.dtype, device=self.device)
+            ball_u1 = {}
+
         # implicit diagonal on the hinge rows: gearbox + end-stop
         diag = e.damping.expand(B, NJ).clone()
         if lim.enabled:
@@ -314,8 +360,21 @@ class K1PHPlant:
 
         Ks = mot.gyrator_scale(i_n, e.tau_max) * mot.k if self.motors_connected else zeros22
 
-        def solve(normal_on, stick_on, f_slip, self_on=None):
+        def solve(normal_on, stick_on, f_slip, self_on=None, ball_on=None, ground_on=None):
             A, Ftot = A0, F
+            if use_ball:  # the ball's 3 linear velocities eliminated from the system (Schur complement)
+                wb = ball_on.to(self.dtype)
+                wg = ground_on.to(self.dtype)
+                A = A + h * cb_eff * torch.einsum("bp,bpd,bpe->bde", wb, Jb, Jb)
+                Ftot = Ftot - torch.einsum("bp,bpd->bd", bp.k * b_state.delta * wb, Jb)
+                Abb = bp.mass * eye3 + h * cb_eff * torch.einsum("bp,bpi,bpj->bij", wb, b_state.n, b_state.n)
+                Abb[:, 2, 2] += h * cg_eff * wg
+                bb = bp.mass * bu + h * (bp.mass * g_vec + torch.einsum("bp,bpi->bi", bp.k * b_state.delta * wb, b_state.n))
+                bb[:, 2] += h * bp.k_ground * dg * wg
+                Cb = h * cb_eff * torch.einsum("bp,bpd,bpi->bdi", wb, Jb, b_state.n)     # (B,28,3)
+                Abb_inv = torch.linalg.inv(Abb)
+                A = A - Cb @ Abb_inv @ Cb.transpose(1, 2)
+                Ftot = Ftot + (Cb @ (Abb_inv @ bb[..., None])).squeeze(-1) / h
             if self_on is not None:
                 A = A + h * cs_eff * torch.einsum("bp,bpd,bpe->bde", self_on.to(self.dtype), Js, Js)
                 Ftot = Ftot + torch.einsum("bp,bpd->bd", sp.k * s_state.delta * self_on, Js)
@@ -347,12 +406,16 @@ class K1PHPlant:
             nu_f = nu0 + h * (Y @ (Ks * i1)[..., None]).squeeze(-1)
             nu1 = torch.zeros(B, NV, dtype=self.dtype, device=self.device)
             nu1[:, f] = nu_f
+            if use_ball:
+                ball_u1["u"] = (Abb_inv @ (bb + (Cb.transpose(1, 2) @ nu1[..., None]).squeeze(-1))[..., None]).squeeze(-1)
             return nu1, i1, A
 
         no_slip = torch.zeros(B, nc, 2, dtype=self.dtype, device=self.device)
         normal_on, stick_on, f_slip = cand, cand, no_slip
         self_on = s_state.active if use_self else None
-        nu1, i1, A = solve(normal_on, stick_on, f_slip, self_on)
+        ball_on = b_state.active if use_ball else None
+        ground_on = dg > 0 if use_ball else None
+        nu1, i1, A = solve(normal_on, stick_on, f_slip, self_on, ball_on, ground_on)
         changed = False
         if use_contact and bool(cand.any()):
             vc1 = torch.einsum("bcid,bd->bci", Jc, nu1)
@@ -372,8 +435,16 @@ class K1PHPlant:
             if not torch.equal(self2, self_on):
                 self_on = self2
                 changed = True
+        if use_ball:  # unilateral: neither a box nor the ground pulls the ball
+            u1 = ball_u1["u"]
+            gb = torch.einsum("bpi,bi->bp", b_state.n, u1) - torch.einsum("bpd,bd->bp", Jb, nu1)
+            ball2 = b_state.active & (bp.k * b_state.delta - cb_eff * gb > 0)
+            ground2 = (dg > 0) & (bp.k_ground * dg - cg_eff * u1[:, 2] > 0)
+            if not (torch.equal(ball2, ball_on) and torch.equal(ground2, ground_on)):
+                ball_on, ground_on = ball2, ground2
+                changed = True
         if changed:
-            nu1, i1, A = solve(normal_on, stick_on, f_slip, self_on)
+            nu1, i1, A = solve(normal_on, stick_on, f_slip, self_on, ball_on, ground_on)
 
         # ---- post-step: forces, bristles, ledger ---------------------------
         thd1 = nu1[:, NB:]
@@ -399,6 +470,29 @@ class K1PHPlant:
             vn = torch.einsum("bpd,bd->bp", Js, nu1)
             diss_contact = diss_contact + sc.dissipated(sp, s_state, (sp.k * s_state.delta - cs_eff * vn) * self_on, vn, h)
 
+        if use_ball:
+            u1 = ball_u1["u"]
+            gb = torch.einsum("bpi,bi->bp", b_state.n, u1) - torch.einsum("bpd,bd->bp", Jb, nu1)   # separation speed
+            fb = (bp.k * b_state.delta - cb_eff * gb) * ball_on
+            d_new = (b_state.delta - h * gb).clamp_min(0) * b_state.active
+            fg = (bp.k_ground * dg - cg_eff * u1[:, 2]) * ground_on
+            dg_new = (dg - h * u1[:, 2]).clamp_min(0) * (dg > 0)
+            # losses = work of the robot on the ball's elements minus what the ball's tanks gained in this step
+            # (dampers, and the implicit step's own damping of the light ball)
+            work_in = h * (fb * torch.einsum("bpd,bd->bp", Jb, nu1)).sum(-1)
+            d_tanks = (0.5 * bp.mass * ((u1 * u1).sum(-1) - (bu * bu).sum(-1)) - h * bp.mass * (u1 @ g_vec)
+                       + 0.5 * bp.k * (d_new**2 - b_state.delta**2).sum(-1) + 0.5 * bp.k_ground * (dg_new**2 - dg**2))
+            diss_contact = diss_contact + work_in - d_tanks
+            Jc_ball = point_jacobian(kin, bl.build_boxes(m).body, b_state.point)          # (B,nb,3,28)
+            vc_ball = torch.einsum("bpid,bd->bpi", Jc_ball, nu1)
+            u1f, om1, J_ball, lost_pair = bl.pair_friction(bp, u1, bom, b_state.n, fb, vc_ball, h)
+            ball_dp = -torch.einsum("bpid,bpi->bd", Jc_ball, J_ball)                      # the reaction on the robot
+            diss_contact = diss_contact + lost_pair
+            u2, om2, lost = bl.friction(bp, u1f, om1, fg, h)
+            diss_contact = diss_contact + lost
+            self.ball = torch.cat((bx + h * u1, u2, om2), -1)
+            self.ball_force = fb  # (B,nb) normal force of every box on the ball in this step
+
         tau_motor = Ks * i1
         led = self.ledger
         led.supplied += h * (v * i1).sum(-1)
@@ -423,6 +517,8 @@ class K1PHPlant:
             quat = quat_mul(self.q[:, 3:7], quat_exp(h * nu1[:, :3]))
             q[:, 3:7] = quat / torch.linalg.norm(quat, dim=-1, keepdim=True)
         self.p = (M @ nu1[..., None]).squeeze(-1)
+        if use_ball:
+            self.p = self.p + ball_dp
         self.q = q
         self.lam = mot.L * i1
         self.time += h

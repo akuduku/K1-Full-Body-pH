@@ -27,6 +27,7 @@ struct StepIO {
     const T* fext;   // 3 world-frame force on the trunk origin (e.g. a get-up assist), null = none
     const T* fgen;   // NV generalised force (e.g. J^T f of a push on any body point), null = none
     const T* rp;     // NRP this robot's parameter row (config.hpp RP_*), null = the ModelData values
+    T* ball;         // NBALL this robot's ball (centre, linear velocity, angular velocity), null = no ball
     // motor driver; active when target != null (set per plant step by the command path in launch.hpp)
     const T* target;    // NJ the target the driver holds this step (already filtered and delayed)
     const T* kp;        // NJ
@@ -64,6 +65,17 @@ struct Work {
     int self_pair[MAX_SELF_ACTIVE];
     uint8_t self_on[MAX_SELF_ACTIVE];
     int nself;
+    // ball: the boxes it overlaps at x_n (normal robot -> ball, row = n . J_c), the ground, and the 3x3 block of its
+    // linear velocity that implicit_solve eliminates
+    int nball;
+    uint8_t ball_on[MAX_BALL_BOXES];
+    T ball_delta[MAX_BALL_BOXES], ball_n[MAX_BALL_BOXES][3], ball_row[MAX_BALL_BOXES][NV];
+    T ball_x[MAX_BALL_BOXES][3];  // the boxes' contact points
+    int ball_body[MAX_BALL_BOXES];
+    T ball_dp[NV];                // friction's reaction on the robot's momentum
+    T ball_dg;
+    uint8_t ground_cand, ground_on;
+    T ball_Ainv[9], ball_bb[3], ball_C[NV][3], ball_u1[3];
     // this robot's effective parameters (ModelData, changed by its parameter row): set by effective_params
     T k_n, c_n, k_t, c_t, mu;
     T damping[NJ], tau_max[NJ];
@@ -173,6 +185,98 @@ PH_HD void self_row(const ModelData<T>& m, const Work<T>& w, int p, const T* n, 
     for (int s = 0; s < nz; ++s) row[idx[s]] -= n[0] * col[s][0] + n[1] * col[s][1] + n[2] * col[s][2];
 }
 
+// Ball (ph_k1/ball.py).  Box j against the ball's centre xb: false if apart, else the overlap, the normal
+// (robot -> ball) and the box's closest point x
+template <class T>
+PH_HD bool ball_pair(const ModelData<T>& m, const Work<T>& w, const T* xb, int j, T& delta, T* n, T* x) {
+    const int b = m.box_body[j];
+    const T* half = m.box_half[j];
+    T Rw[9], cw[3], d[3], loc[3], cl[3], nl[3];
+    mm3(w.f.R[b], m.box_rot[j], Rw);
+    mv3(w.f.R[b], m.box_pos[j], cw);
+    for (int i = 0; i < 3; ++i) {
+        cw[i] += w.f.P[b][i];
+        d[i] = xb[i] - cw[i];
+    }
+    T d2 = 0;
+    for (int i = 0; i < 3; ++i) {
+        loc[i] = Rw[0 * 3 + i] * d[0] + Rw[1 * 3 + i] * d[1] + Rw[2 * 3 + i] * d[2];  // Rw^T d
+        cl[i] = p_clamp(loc[i], -half[i], half[i]);
+        nl[i] = loc[i] - cl[i];
+        d2 += nl[i] * nl[i];
+    }
+    const T dist = p_sqrt(d2);
+    if (dist < T(1e-9)) {  // the centre is inside the box: out through the nearest face
+        int ax = 0;
+        T room = half[0] - p_abs(loc[0]);
+        for (int i = 1; i < 3; ++i) {
+            const T r = half[i] - p_abs(loc[i]);
+            if (r < room) {
+                room = r;
+                ax = i;
+            }
+        }
+        const T sg = loc[ax] >= T(0) ? T(1) : T(-1);
+        for (int i = 0; i < 3; ++i) {
+            nl[i] = 0;
+            cl[i] = loc[i];
+        }
+        nl[ax] = sg;
+        cl[ax] = sg * half[ax];
+        delta = m.ball_r + room;
+    } else {
+        if (dist >= m.ball_r) return false;
+        for (int i = 0; i < 3; ++i) nl[i] /= dist;
+        delta = m.ball_r - dist;
+    }
+    mv3(Rw, nl, n);
+    mv3(Rw, cl, x);
+    for (int i = 0; i < 3; ++i) x[i] += cw[i];
+    return true;
+}
+
+// the boxes the ball overlaps at x_n and its ground overlap -> w.ball_*, all on
+template <class T>
+PH_HD void ball_collect(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
+    w.nball = 0;
+    for (int j = 0; j < m.nbox && w.nball < MAX_BALL_BOXES; ++j) {
+        T delta = 0, n[3], x[3];
+        if (!ball_pair(m, w, io.ball, j, delta, n, x)) continue;
+        const int k = w.nball++;
+        w.ball_on[k] = 1;
+        w.ball_delta[k] = delta;
+        for (int i = 0; i < 3; ++i) {
+            w.ball_n[k][i] = n[i];
+            w.ball_x[k][i] = x[i];
+        }
+        w.ball_body[k] = m.box_body[j];
+        for (int d = 0; d < NV; ++d) w.ball_row[k][d] = 0;
+        int idx[NV];
+        T col[NV][3];
+        const int nz = point_jacobian(m, w.f, m.box_body[j], x, idx, col);
+        for (int s = 0; s < nz; ++s) w.ball_row[k][idx[s]] += n[0] * col[s][0] + n[1] * col[s][1] + n[2] * col[s][2];
+    }
+    w.ball_dg = p_max(m.ball_r - io.ball[2], T(0));
+    w.ground_cand = w.ball_dg > T(0);
+    w.ground_on = w.ground_cand;
+}
+
+// inverse of a 3x3 matrix (row-major)
+template <class T>
+PH_HD void inv3(const T* a, T* o) {
+    const T c00 = a[4] * a[8] - a[5] * a[7], c01 = a[5] * a[6] - a[3] * a[8], c02 = a[3] * a[7] - a[4] * a[6];
+    const T id = T(1) / (a[0] * c00 + a[1] * c01 + a[2] * c02);
+    o[0] = c00 * id;
+    o[1] = (a[2] * a[7] - a[1] * a[8]) * id;
+    o[2] = (a[1] * a[5] - a[2] * a[4]) * id;
+    o[3] = c01 * id;
+    o[4] = (a[0] * a[8] - a[2] * a[6]) * id;
+    o[5] = (a[2] * a[3] - a[0] * a[5]) * id;
+    o[6] = c02 * id;
+    o[7] = (a[1] * a[6] - a[0] * a[7]) * id;
+    o[8] = (a[0] * a[4] - a[1] * a[3]) * id;
+}
+
 // The implicit solve for the given contact modes -> w.nu1, w.i1   (plant.py step.solve)
 template <class T>
 PH_HD void implicit_solve(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w, int f0, int n, bool use_contact) {
@@ -196,6 +300,57 @@ PH_HD void implicit_solve(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w
                 if (ga == T(0)) continue;
                 for (int b = 0; b < n; ++b) w.A[a * NV + b] += ga * row[b + f0];
             }
+        }
+    }
+
+    if (io.ball) {  // the ball's 3 linear velocities, eliminated from the system (Schur complement, ph_k1/ball.py)
+        const T cb_eff = m.ball_c + h * m.ball_k, cg_eff = m.ball_cg + h * m.ball_kg;
+        T Abb[9] = {m.ball_m, 0, 0, 0, m.ball_m, 0, 0, 0, m.ball_m};
+        const T* u0 = io.ball + 3;
+        for (int i = 0; i < 3; ++i) w.ball_bb[i] = m.ball_m * u0[i] + (m.gravity ? h * m.ball_m * m.g[i] : T(0));
+        for (int d = 0; d < NV; ++d)
+            for (int i = 0; i < 3; ++i) w.ball_C[d][i] = 0;
+        bool touching = false;
+        for (int k = 0; k < w.nball; ++k) {
+            if (!w.ball_on[k]) continue;
+            touching = true;
+            const T* row = w.ball_row[k];
+            const T* nv = w.ball_n[k];
+            const T fs = m.ball_k * w.ball_delta[k];
+            for (int d = 0; d < NV; ++d) w.Fc[d] -= fs * row[d];
+            for (int a = 0; a < n; ++a) {
+                const T ga = h * cb_eff * row[a + f0];
+                if (ga == T(0)) continue;
+                for (int b = 0; b < n; ++b) w.A[a * NV + b] += ga * row[b + f0];
+            }
+            for (int i = 0; i < 3; ++i) {
+                for (int j = 0; j < 3; ++j) Abb[i * 3 + j] += h * cb_eff * nv[i] * nv[j];
+                w.ball_bb[i] += h * fs * nv[i];
+            }
+            for (int d = 0; d < NV; ++d)
+                for (int i = 0; i < 3; ++i) w.ball_C[d][i] += h * cb_eff * row[d] * nv[i];
+        }
+        if (w.ground_on) {
+            Abb[8] += h * cg_eff;
+            w.ball_bb[2] += h * m.ball_kg * w.ball_dg;
+        }
+        inv3(Abb, w.ball_Ainv);
+        if (touching) {
+            for (int a = 0; a < n; ++a) {
+                const T* ca = w.ball_C[a + f0];
+                T CA[3];
+                for (int j = 0; j < 3; ++j)
+                    CA[j] = ca[0] * w.ball_Ainv[0 * 3 + j] + ca[1] * w.ball_Ainv[1 * 3 + j] + ca[2] * w.ball_Ainv[2 * 3 + j];
+                if (CA[0] == T(0) && CA[1] == T(0) && CA[2] == T(0)) continue;
+                for (int b = 0; b < n; ++b) {
+                    const T* cb = w.ball_C[b + f0];
+                    w.A[a * NV + b] -= CA[0] * cb[0] + CA[1] * cb[1] + CA[2] * cb[2];
+                }
+            }
+            T Ab[3];
+            mv3(w.ball_Ainv, w.ball_bb, Ab);
+            for (int d = 0; d < NV; ++d)
+                w.Fc[d] += (w.ball_C[d][0] * Ab[0] + w.ball_C[d][1] * Ab[1] + w.ball_C[d][2] * Ab[2]) / h;
         }
     }
 
@@ -263,6 +418,12 @@ PH_HD void implicit_solve(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w
         T s = w.nu0[a];
         for (int j = 0; j < NJ; ++j) s += h * w.Y[a * NJ + j] * w.Ks[j] * w.i1[j];
         w.nu1[a + f0] = s;
+    }
+    if (io.ball) {  // u1 = A_bb^-1 (b_b + C^T nu1)
+        T r[3] = {w.ball_bb[0], w.ball_bb[1], w.ball_bb[2]};
+        for (int d = 0; d < NV; ++d)
+            for (int i = 0; i < 3; ++i) r[i] += w.ball_C[d][i] * w.nu1[d];
+        mv3(w.ball_Ainv, r, w.ball_u1);
     }
 }
 
@@ -344,6 +505,8 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
         self_spheres(m, w);
         self_collect(m, w);
     }
+    w.nball = 0;
+    if (io.ball) ball_collect(m, io, w);
 
     // hinge diagonal: gearbox damping + end stops
     for (int k = 0; k < NJ; ++k) {
@@ -422,6 +585,23 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
             }
         }
     }
+    const T cb_eff = m.ball_c + h * m.ball_k, cg_eff = m.ball_cg + h * m.ball_kg;
+    if (io.ball) {  // unilateral: neither a box nor the ground pulls the ball
+        for (int k = 0; k < w.nball; ++k) {
+            if (!w.ball_on[k]) continue;
+            T rv = 0;
+            for (int d = 0; d < NV; ++d) rv += w.ball_row[k][d] * w.nu1[d];
+            const T g = dot3(w.ball_n[k], w.ball_u1) - rv;
+            if (m.ball_k * w.ball_delta[k] - cb_eff * g <= T(0)) {
+                w.ball_on[k] = 0;
+                changed = true;
+            }
+        }
+        if (w.ground_on && m.ball_kg * w.ball_dg - cg_eff * w.ball_u1[2] <= T(0)) {
+            w.ground_on = 0;
+            changed = true;
+        }
+    }
     if (changed) implicit_solve(m, io, w, f0, n, use_contact);
 
     // post-step: forces, bristles, ledger
@@ -483,6 +663,86 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
         diss_contact += work_in - dV;
     }
 
+    if (io.ball) {
+        T* xb = io.ball;
+        T* ub = io.ball + 3;
+        T* ob = io.ball + 6;
+        const T* u1 = w.ball_u1;  // from the solve; after the boxes' friction it points to uf
+        // losses = work of the robot on the ball's elements minus what the ball's tanks gained in this step
+        T work_in = 0, dV = 0;
+        for (int k = 0; k < w.nball; ++k) {
+            T rv = 0;
+            for (int d = 0; d < NV; ++d) rv += w.ball_row[k][d] * w.nu1[d];
+            const T g = dot3(w.ball_n[k], u1) - rv;
+            const T f = w.ball_on[k] ? m.ball_k * w.ball_delta[k] - cb_eff * g : T(0);
+            work_in += h * f * rv;
+            const T d_new = p_max(w.ball_delta[k] - h * g, T(0));
+            dV += T(0.5) * m.ball_k * (d_new * d_new - w.ball_delta[k] * w.ball_delta[k]);
+        }
+        const T fg = w.ground_on ? m.ball_kg * w.ball_dg - cg_eff * u1[2] : T(0);
+        const T dg_new = w.ground_cand ? p_max(w.ball_dg - h * u1[2], T(0)) : T(0);
+        dV += T(0.5) * m.ball_kg * (dg_new * dg_new - w.ball_dg * w.ball_dg);
+        const T dT = T(0.5) * m.ball_m * (dot3(u1, u1) - dot3(ub, ub));
+        const T dG = m.gravity ? -h * m.ball_m * dot3(u1, m.g) : T(0);
+        diss_contact += work_in - dT - dG - dV;
+        const T I = m.ball_I, r = m.ball_r;
+        const T m_eff = T(1) / (T(1) / m.ball_m + r * r / I);
+        // Coulomb friction of every touched box at its contact point -r n; the reaction goes to the robot
+        T uf[3] = {u1[0], u1[1], u1[2]}, of[3] = {ob[0], ob[1], ob[2]};
+        for (int d = 0; d < NV; ++d) w.ball_dp[d] = 0;
+        for (int k = 0; k < w.nball; ++k) {
+            T rv = 0;
+            for (int d = 0; d < NV; ++d) rv += w.ball_row[k][d] * w.nu1[d];
+            const T g = dot3(w.ball_n[k], u1) - rv;
+            const T f = w.ball_on[k] ? m.ball_k * w.ball_delta[k] - cb_eff * g : T(0);
+            int idx[NV];
+            T col[NV][3];
+            const int nz = point_jacobian(m, w.f, w.ball_body[k], w.ball_x[k], idx, col);
+            T vc[3] = {0, 0, 0};
+            for (int s = 0; s < nz; ++s)
+                for (int i = 0; i < 3; ++i) vc[i] += col[s][i] * w.nu1[idx[s]];
+            const T* nk = w.ball_n[k];
+            const T rc[3] = {-r * nk[0], -r * nk[1], -r * nk[2]};
+            T wr[3], rel[3];
+            cross3(of, rc, wr);
+            for (int i = 0; i < 3; ++i) rel[i] = uf[i] + wr[i] - vc[i];
+            const T rn = dot3(rel, nk);
+            for (int i = 0; i < 3; ++i) rel[i] -= rn * nk[i];
+            const T sn = p_sqrt(dot3(rel, rel));
+            const T Jn = p_min(sn * m_eff, m.ball_mu_robot * f * h) / p_max(sn, T(1e-12));
+            const T J[3] = {-Jn * rel[0], -Jn * rel[1], -Jn * rel[2]};
+            const T k0 = T(0.5) * m.ball_m * dot3(uf, uf) + T(0.5) * I * dot3(of, of);
+            T rJ[3];
+            cross3(rc, J, rJ);
+            for (int i = 0; i < 3; ++i) {
+                uf[i] += J[i] / m.ball_m;
+                of[i] += rJ[i] / I;
+            }
+            diss_contact += k0 - (T(0.5) * m.ball_m * dot3(uf, uf) + T(0.5) * I * dot3(of, of)) + dot3(J, vc);
+            for (int s = 0; s < nz; ++s) w.ball_dp[idx[s]] -= dot3(col[s], J);
+        }
+        // rolling resistance, then Coulomb friction at the lowest point: impulses that only remove kinetic energy
+        u1 = uf;
+        T ox = of[0], oy = of[1];
+        const T ke0 = T(0.5) * m.ball_m * dot3(u1, u1) + T(0.5) * I * dot3(of, of);
+        const T on = p_sqrt(ox * ox + oy * oy);
+        const T cut = p_min(on, h * m.ball_roll * fg * r / I) / p_max(on, T(1e-12));
+        ox -= cut * ox;
+        oy -= cut * oy;
+        const T s0 = u1[0] - r * oy, s1 = u1[1] + r * ox;
+        const T sn = p_sqrt(s0 * s0 + s1 * s1);
+        const T Jn = p_min(sn * m_eff, m.ball_mu * fg * h) / p_max(sn, T(1e-12));
+        const T J0 = -Jn * s0, J1 = -Jn * s1;
+        const T u2[3] = {u1[0] + J0 / m.ball_m, u1[1] + J1 / m.ball_m, u1[2]};
+        const T o2[3] = {ox + r * J1 / I, oy - r * J0 / I, of[2]};
+        diss_contact += ke0 - (T(0.5) * m.ball_m * dot3(u2, u2) + T(0.5) * I * dot3(o2, o2));
+        for (int i = 0; i < 3; ++i) {
+            xb[i] += h * w.ball_u1[i];
+            ub[i] = u2[i];
+            ob[i] = o2[i];
+        }
+    }
+
     T supplied = 0, copper = 0, gearbox = 0, stops = 0, mech = 0;
     for (int k = 0; k < NJ; ++k) {
         supplied += w.v[k] * w.i1[k];
@@ -537,6 +797,8 @@ PH_HD void plant_step(const ModelData<T>& m, const StepIO<T>& io, Work<T>& w) {
         for (int b = 0; b < NV; ++b) s += w.M[a * NV + b] * w.nu1[b];
         io.p[a] = s;
     }
+    if (io.ball)
+        for (int a = 0; a < NV; ++a) io.p[a] += w.ball_dp[a];
     for (int k = 0; k < NJ; ++k) io.lam[k] = m.mL[k] * w.i1[k];
 
     if (io.out_nu)

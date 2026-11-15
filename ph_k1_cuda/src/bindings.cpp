@@ -121,6 +121,25 @@ torch::Tensor pack(const TensorMap& t, const std::map<std::string, double>& s, c
     put(m.fw_effort, t, "fw_effort", ph::NJ);
     put(m.fw_max_joint_velocity, t, "fw_max_joint_velocity", ph::NJ);
     put(m.fw_max_target_velocity, t, "fw_max_target_velocity", ph::NJ);
+    m.ball_enabled = flag("ball_enabled");
+    m.nbox = flag("nbox");
+    TORCH_CHECK(m.nbox >= 0 && m.nbox <= ph::MAX_BALL_BOXES, "nbox ", m.nbox, " outside 0..", ph::MAX_BALL_BOXES);
+    if (m.nbox > 0) {
+        put_int(m.box_body, t, "box_body", m.nbox);
+        put(&m.box_pos[0][0], t, "box_pos", m.nbox * 3);
+        put(&m.box_rot[0][0], t, "box_rot", m.nbox * 9);
+        put(&m.box_half[0][0], t, "box_half", m.nbox * 3);
+    }
+    m.ball_r = static_cast<T>(num("ball_r"));
+    m.ball_m = static_cast<T>(num("ball_m"));
+    m.ball_I = static_cast<T>(num("ball_I"));
+    m.ball_k = static_cast<T>(num("ball_k"));
+    m.ball_c = static_cast<T>(num("ball_c"));
+    m.ball_kg = static_cast<T>(num("ball_kg"));
+    m.ball_cg = static_cast<T>(num("ball_cg"));
+    m.ball_mu = static_cast<T>(num("ball_mu"));
+    m.ball_roll = static_cast<T>(num("ball_roll"));
+    m.ball_mu_robot = static_cast<T>(num("ball_mu_robot"));
     for (int k = 0; k < ph::NJ; ++k)
         TORCH_CHECK(m.stop_low[k] <= m.jnt_low[k] && m.stop_high[k] >= m.jnt_high[k],
                     "end stop of hinge ", k, " lies inside its command range");
@@ -184,7 +203,7 @@ void run_t(const torch::Tensor& model, const torch::Tensor& q, const torch::Tens
            const c10::optional<torch::Tensor>& out_acc, const c10::optional<torch::Tensor>& out_target,
            const c10::optional<torch::Tensor>& ring_kp, const c10::optional<torch::Tensor>& ring_kd,
            const c10::optional<torch::Tensor>& trunk_force, const c10::optional<torch::Tensor>& gen_force,
-           const c10::optional<torch::Tensor>& robot_params) {
+           const c10::optional<torch::Tensor>& robot_params, const c10::optional<torch::Tensor>& ball) {
     TORCH_CHECK(model.scalar_type() == torch::kUInt8 && model.numel() == static_cast<int64_t>(sizeof(ph::ModelData<T>)),
                 "model block was packed for the other float type (or is corrupt)");
     TORCH_CHECK(model.device() == q.device(), "model block is on ", model.device(), ", the state on ", q.device());
@@ -225,6 +244,7 @@ void run_t(const torch::Tensor& model, const torch::Tensor& q, const torch::Tens
     b.force = rows<T>(trunk_force, q, B, 3, "trunk_force");
     b.gen_force = rows<T>(gen_force, q, B, ph::NV, "gen_force");
     b.robot_params = rows<T>(robot_params, q, B, ph::NRP, "robot_params");
+    b.ball = rows<T>(ball, q, B, ph::NBALL, "ball");
     b.out_nu = rows<T>(out_nu, q, B, ph::NV, "out_nu");
     b.out_i = rows<T>(out_i, q, B, ph::NJ, "out_i");
     b.out_tau = rows<T>(out_tau, q, B, ph::NJ, "out_tau");
@@ -263,16 +283,16 @@ void run(const torch::Tensor& model, const torch::Tensor& q, const torch::Tensor
          const c10::optional<torch::Tensor>& out_acc, const c10::optional<torch::Tensor>& out_target,
            const c10::optional<torch::Tensor>& ring_kp, const c10::optional<torch::Tensor>& ring_kd,
            const c10::optional<torch::Tensor>& trunk_force, const c10::optional<torch::Tensor>& gen_force,
-           const c10::optional<torch::Tensor>& robot_params) {
+           const c10::optional<torch::Tensor>& robot_params, const c10::optional<torch::Tensor>& ball) {
     TORCH_CHECK(nsub >= 1, "nsub must be >= 1");
     if (q.scalar_type() == torch::kFloat64) {
         run_t<double>(model, q, p, xi, lam, ledger, volts, jtau, target, last_target, ring, ring_idx, lag, push, kp, kd, nsub,
                       out_nu, out_i, out_tau, out_v, out_fc, out_active, out_slip, out_gyro, out_acc, out_target,
-                      ring_kp, ring_kd, trunk_force, gen_force, robot_params);
+                      ring_kp, ring_kd, trunk_force, gen_force, robot_params, ball);
     } else if (q.scalar_type() == torch::kFloat32) {
         run_t<float>(model, q, p, xi, lam, ledger, volts, jtau, target, last_target, ring, ring_idx, lag, push, kp, kd, nsub,
                      out_nu, out_i, out_tau, out_v, out_fc, out_active, out_slip, out_gyro, out_acc, out_target,
-                      ring_kp, ring_kd, trunk_force, gen_force, robot_params);
+                      ring_kp, ring_kd, trunk_force, gen_force, robot_params, ball);
     } else {
         TORCH_CHECK(false, "state must be float32 or float64");
     }
@@ -296,12 +316,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
             py::arg("out_slip") = py::none(), py::arg("out_gyro") = py::none(), py::arg("out_acc") = py::none(),
             py::arg("out_target") = py::none(), py::arg("ring_kp") = py::none(), py::arg("ring_kd") = py::none(),
             py::arg("trunk_force") = py::none(), py::arg("gen_force") = py::none(),
-            py::arg("robot_params") = py::none());
+            py::arg("robot_params") = py::none(), py::arg("ball") = py::none());
     mod.attr("NQ") = ph::NQ;
     mod.attr("NV") = ph::NV;
     mod.attr("NJ") = ph::NJ;
     mod.attr("LEDGER") = ph::LEDGER;
     mod.attr("NRP") = ph::NRP;
+    mod.attr("NBALL") = ph::NBALL;
 #ifdef PH_K1_WITH_CUDA
     mod.attr("WITH_CUDA") = true;
 #else

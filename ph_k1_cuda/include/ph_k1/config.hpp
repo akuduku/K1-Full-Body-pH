@@ -21,6 +21,8 @@ constexpr int MAX_CONTACTS = 192; // the K1 has 128 (8 sole points + 8 box corne
 constexpr int MAX_SPHERES = 64;      // self-contact spheres (ph_k1/self_contact.py; the K1 has 59)
 constexpr int MAX_SELF_PAIRS = 2048; // sphere pairs with an element (the K1 has 1389)
 constexpr int MAX_SELF_ACTIVE = 64;  // overlapping pairs booked in the energy ledger per step
+constexpr int MAX_BALL_BOXES = 8;   // boxes of the robot the ball can touch (ph_k1/ball.py; the K1 has 4)
+constexpr int NBALL = 9;            // ball state: centre, linear velocity, angular velocity (world)
 constexpr int LEDGER = 6;         // supplied, mech_input, copper, gearbox, stops, contact  (plant.py Ledger)
 
 // Per-robot physical parameters (ph_k1/robot_params.py is the reference): one row of NRP numbers per robot, on top
