@@ -4,11 +4,9 @@ MuJoCo is used here only as an XML parser: masses, inertia tensors, link
 offsets, hinge axes, joint ranges, foot boxes.  Stepping, contact and forces
 are all ours (dynamics.py, contact.py, plant.py).
 
-The servo numbers do NOT come from this MJCF: armature and torque ceiling
-are Eric Plass's k1_skill_cfg.py values (servo.py).
-This MJCF has the old ankle armature (0.0565 = 2x E4310 on both axes) and
-older, lower <motor forcerange> (knee 40, hip pitch 30 N m);
-`apply_servo_table` overwrites them in every MjModel used next to the plant.
+The servo numbers do NOT come from the MJCF: armature and torque ceiling
+are Eric Plass's k1_skill_cfg.py values (servo.py); `apply_servo_table`
+overwrites the MJCF's in every MjModel used next to the plant (load_mj).
 
 Generalised velocity (28):
     nu = (omega_B, v_B, theta_dot)
@@ -31,10 +29,37 @@ import torch
 from . import servo
 
 HERE = Path(__file__).resolve().parent
-# Bundled copy (assets/K1, with meshes); falls back to the thesis folder layout.
-_LOCAL_XML = HERE.parent / "assets" / "K1" / "K1_22dof.xml"
+# The robot model: Booster's standard K1_22dof.xml as K1_Deploy's twin installs it (assets/K1_standard, with its
+# manifest: the upstream revision and file hashes).  assets/K1/K1_22dof.xml is an older variant with convex-decomposed
+# hand collision meshes, hand-tip bodies and other joint ranges; the plant used it until 15 Nov 2026 (HAND_XML, for
+# reproducing runs from before).  Masses, inertias, link offsets and the joint order are the same in both.
+STANDARD_XML = HERE.parent / "assets" / "K1_standard" / "K1_22dof.xml"
+HAND_XML = HERE.parent / "assets" / "K1" / "K1_22dof.xml"
 _THESIS_XML = HERE.parents[2] / "Presentation" / "assets_K1" / "K1_22dof.xml"
-DEFAULT_XML = _LOCAL_XML if _LOCAL_XML.exists() else _THESIS_XML
+DEFAULT_XML = next((x for x in (STANDARD_XML, HAND_XML) if x.exists()), _THESIS_XML)
+
+# The plant's own names (those of the older MJCF; code, tests and contracts use them).  The standard MJCF's names are
+# mapped onto them when it is loaded (load_mj).
+JOINT_NAMES = (
+    "AAHead_yaw", "Head_pitch",
+    "ALeft_Shoulder_Pitch", "Left_Shoulder_Roll", "Left_Elbow_Pitch", "Left_Elbow_Yaw",
+    "ARight_Shoulder_Pitch", "Right_Shoulder_Roll", "Right_Elbow_Pitch", "Right_Elbow_Yaw",
+    "Left_Hip_Pitch", "Left_Hip_Roll", "Left_Hip_Yaw", "Left_Knee_Pitch", "Left_Ankle_Pitch", "Left_Ankle_Roll",
+    "Right_Hip_Pitch", "Right_Hip_Roll", "Right_Hip_Yaw", "Right_Knee_Pitch", "Right_Ankle_Pitch", "Right_Ankle_Roll",
+)
+_STANDARD_JOINT = {"aahead_yaw_joint": "AAHead_yaw", "aahead_pitch_joint": "Head_pitch",
+                   **{("aa" if n[0] == "A" else "") + n.lstrip("A").lower() + "_joint": n for n in JOINT_NAMES[2:]}}
+_STANDARD_BODY = {
+    "trunk": "Trunk", "aahead_yaw_link": "Head_1", "aahead_pitch_link": "Head_2",
+    **{f"{a}{s}_{part}_link": f"{S}_{name}"
+       for s, S in (("left", "Left"), ("right", "Right"))
+       for a, part, name in (("aa", "shoulder_pitch", "Arm_1"), ("", "shoulder_roll", "Arm_2"),
+                             ("", "elbow_pitch", "Arm_3"), ("", "hip_pitch", "Hip_Pitch"),
+                             ("", "hip_roll", "Hip_Roll"), ("", "hip_yaw", "Hip_Yaw"), ("", "knee_pitch", "Shank"),
+                             ("", "ankle_pitch", "Ankle_Cross"))},
+    "left_elbow_yaw_link": "left_hand_link", "right_elbow_yaw_link": "right_hand_link",   # the forearm: no hand
+    "left_ankle_roll_link": "left_foot_link", "right_ankle_roll_link": "right_foot_link",
+}
 
 NB = 6  # base dofs
 NJ = 22  # hinges
@@ -59,8 +84,8 @@ HOME_POSE = {
 
 # Joint angles the real K1 (Phobos) reached in its two get-ups, min/max over getup_2236.csv and
 # getup_front_2250.csv (Karls Repo/Logs/30102026, 25 Oct 2026, 500 Hz).  Several lie outside the MJCF range
-# -- the MJCF range is the FIRMWARE's command clamp (K1_Deploy
-# k1_config.h joint_pos_lower/upper are the same numbers), not the mechanical stop.
+# of the older MJCF and of the firmware's command clamp (K1_Deploy k1_config.h joint_pos_lower/upper, the same
+# numbers as the older MJCF's ranges); the standard MJCF's ranges are wider at the elbows and the knee.
 MEASURED_RANGE = {
     "AAHead_yaw": (-0.718, 1.343), "Head_pitch": (-0.413, 0.753),
     "ALeft_Shoulder_Pitch": (-2.005, 0.490), "Left_Shoulder_Roll": (-1.804, -0.148),
@@ -72,9 +97,12 @@ MEASURED_RANGE = {
     "Right_Hip_Pitch": (-1.691, 0.644), "Right_Hip_Roll": (-1.521, 0.455), "Right_Hip_Yaw": (-0.719, 0.786),
     "Right_Knee_Pitch": (-0.028, 1.943), "Right_Ankle_Pitch": (-0.793, 0.331), "Right_Ankle_Roll": (-0.353, 0.503),
 }
-# Mechanical end stops of the plant (the pH end-stop springs): the MJCF range widened by STOP_TOLERANCE (the
-# firmware accepts readings up to 0.15 rad past its range, K1_Deploy main.cpp range check), and further to
-# MEASURED_RANGE + STOP_MARGIN where the robot went beyond that.
+# Three ranges per joint:
+#   jnt_low/high   the firmware's command clamp (k1_config.h): what a policy can ask for
+#   mjcf_low/high  the range written in the MJCF
+#   stop_low/high  the mechanical end stops of the plant (the pH end-stop springs): the wider of the two above,
+#                  widened by STOP_TOLERANCE (the firmware accepts readings up to 0.15 rad past its range, K1_Deploy
+#                  main.cpp range check), and further to MEASURED_RANGE + STOP_MARGIN where the robot went beyond.
 STOP_TOLERANCE = 0.15
 STOP_MARGIN = 0.05
 
@@ -110,11 +138,13 @@ class K1Model:
     ipos: torch.Tensor  # (nb,3) COM in body frame
     I_body: torch.Tensor  # (nb,3,3) rotational inertia about COM, body frame
     armature: torch.Tensor  # (22,) servo.ARMATURE (reflected motor inertia, k1_skill_cfg)
-    jnt_low: torch.Tensor  # (22,) MJCF range = the firmware's command clamp
+    jnt_low: torch.Tensor  # (22,) the firmware's command clamp (k1_config.h joint_pos_lower/upper)
     jnt_high: torch.Tensor  # (22,)
+    mjcf_low: torch.Tensor  # (22,) the range written in the MJCF
+    mjcf_high: torch.Tensor  # (22,)
     stop_low: torch.Tensor  # (22,) mechanical end stops (end-stop springs), wider: see MEASURED_RANGE
     stop_high: torch.Tensor  # (22,)
-    forcerange: torch.Tensor  # (22,) |tau| ceiling of this MJCF's <motor> as authored (= k1_config.h effort_limit)
+    forcerange: torch.Tensor  # (22,) |tau| ceiling of this MJCF's <motor> as authored
     effort: torch.Tensor  # (22,) servo.EFFORT: the torque ceiling of k1_skill_cfg (the plant's)
     support: torch.Tensor  # (nb,28) 1 if dof d moves body b
     subtree: torch.Tensor  # (22,nb) 1 if body b is at/after hinge k
@@ -158,6 +188,24 @@ def apply_servo_table(m: mujoco.MjModel) -> mujoco.MjModel:
     return m
 
 
+def load_mj(xml_path: Path | str = DEFAULT_XML) -> mujoco.MjModel:
+    """The MJCF as an MjModel with the plant's body and joint names (the standard MJCF's names are renamed; the
+    older MJCF has them already).  Everything that needs a MuJoCo model of the robot loads it here."""
+    spec = mujoco.MjSpec.from_file(str(xml_path))
+    if not any(j.name in _STANDARD_JOINT for j in spec.joints):
+        return spec.compile()
+    for b in spec.bodies:
+        b.name = _STANDARD_BODY.get(b.name, b.name)
+    for j in spec.joints:
+        j.name = _STANDARD_JOINT.get(j.name, j.name)
+    for a in spec.actuators:
+        a.name = _STANDARD_JOINT.get(a.name, a.name)
+        a.target = _STANDARD_JOINT.get(a.target, a.target)
+    for x in spec.sensors:
+        x.objname = _STANDARD_BODY.get(x.objname, _STANDARD_JOINT.get(x.objname, x.objname))
+    return spec.compile()
+
+
 def load_k1(
     xml_path: Path | str = DEFAULT_XML,
     dtype: torch.dtype = torch.float64,
@@ -166,7 +214,7 @@ def load_k1(
 ) -> K1Model:
     """body_contacts=False: only the 8 sole points touch the ground."""
     xml_path = Path(xml_path)
-    m = mujoco.MjModel.from_xml_path(str(xml_path))
+    m = load_mj(xml_path)
     dev = torch.device(device)
     T = lambda a: torch.as_tensor(np.asarray(a), dtype=dtype, device=dev)  # noqa: E731
 
@@ -252,8 +300,12 @@ def load_k1(
         act_range[j] = m.actuator_forcerange[a, 1] if m.actuator_forcelimited[a] else np.inf
     apply_servo_table(m)  # after reading the authored force range
 
+    from . import firmware  # here: firmware imports this module
+
     rng = m.jnt_range[1:]
-    stop_lo, stop_hi = rng[:, 0] - STOP_TOLERANCE, rng[:, 1] + STOP_TOLERANCE
+    clamp_lo, clamp_hi = np.asarray(firmware.JOINT_POS_LOWER), np.asarray(firmware.JOINT_POS_UPPER)
+    stop_lo = np.minimum(rng[:, 0], clamp_lo) - STOP_TOLERANCE
+    stop_hi = np.maximum(rng[:, 1], clamp_hi) + STOP_TOLERANCE
     for j, name in enumerate(jnames):
         if name in MEASURED_RANGE:
             lo, hi = MEASURED_RANGE[name]
@@ -278,8 +330,10 @@ def load_k1(
         ipos=T(m.body_ipos[1:]),
         I_body=T(I_body),
         armature=T(m.dof_armature[NB:]),
-        jnt_low=T(rng[:, 0]),
-        jnt_high=T(rng[:, 1]),
+        jnt_low=T(clamp_lo),
+        jnt_high=T(clamp_hi),
+        mjcf_low=T(rng[:, 0]),
+        mjcf_high=T(rng[:, 1]),
         stop_low=T(stop_lo),
         stop_high=T(stop_hi),
         forcerange=T(act_range),

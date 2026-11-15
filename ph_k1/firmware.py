@@ -35,7 +35,8 @@ from .drive import GAINS, _group
 from .model import NB, NJ, K1Model
 
 # ---------------------------------------------------------------- K1_Deploy firmware/include/k1_config.h
-# Joint order of the firmware = MJCF order (check_tables verifies the ranges and efforts against the MJCF).
+# Joint order of the firmware = MJCF order.  The position tables are the plant's command clamp (model.jnt_low/high);
+# they equal the older MJCF's ranges, the standard MJCF's are wider (ph_k1/model.py).
 JOINT_POS_LOWER = (-1.0, -0.349, -3.316, -1.74, -2.27, -2.44, -3.316, -1.57, -2.27, 0.0,
                    -3.0, -0.4, -1.0, 0.0, -0.87, -0.345, -3.0, -1.57, -1.0, 0.0, -0.87, -0.345)
 JOINT_POS_UPPER = (1.0, 0.855, 1.22, 1.57, 2.27, 0.0, 1.22, 1.74, 2.27, 2.44,
@@ -102,13 +103,13 @@ class FirmwareConfig:
 
 
 def check_tables(model: K1Model) -> None:
-    """The firmware tables must describe the same robot as the MJCF the plant is built from."""
-    for name, table, ref in (("joint_pos_lower", JOINT_POS_LOWER, model.jnt_low),
-                             ("joint_pos_upper", JOINT_POS_UPPER, model.jnt_high),
-                             ("effort_limit", EFFORT_LIMIT, model.forcerange)):
-        diff = (torch.as_tensor(table, dtype=torch.float64) - ref.detach().cpu().double()).abs().max().item()
-        if diff > 1e-3:
-            raise ValueError(f"K1_Deploy {name} differs from the MJCF by {diff:.3g}: not the same robot model")
+    """The firmware tables must fit the model the plant is built from: 22 joints, and every command the firmware
+    lets through lies inside the plant's mechanical end stops."""
+    lo, hi = (torch.as_tensor(t, dtype=torch.float64) for t in (JOINT_POS_LOWER, JOINT_POS_UPPER))
+    if lo.numel() != model.stop_low.numel():
+        raise ValueError(f"K1_Deploy tables have {lo.numel()} joints, the model {model.stop_low.numel()}")
+    if bool((lo < model.stop_low.detach().cpu().double()).any() or (hi > model.stop_high.detach().cpu().double()).any()):
+        raise ValueError("K1_Deploy joint_pos_lower/upper reach beyond the model's end stops: not the same robot")
 
 
 def gains(model: K1Model, preset: str = "walk", gain_scale: float = 1.0):
