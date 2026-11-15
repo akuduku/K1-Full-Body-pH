@@ -33,9 +33,12 @@ rl/             RL TRAINING on the pH plant
                 export (-> deploy.bin for the robot), eval_mujoco (laptop sim-to-sim check), tests
   getup/        get up and stay up: contract (StandupAgent + gains), impedance (the energy tank), lying
                 (start states), env (pH rewards, curriculum), train (by time), eval_mujoco, tests
+  kick/         walk and kick a ball (the firmware's kick_walk agent, Eric Plass's k1_kick task): contract, camera,
+                env, evaluate (a MuJoCo-trained kick on the pH plant), hamiltonian (the energy figure), train, tests
+  walk/         a trained walking policy on the pH plant and on MuJoCo: slider viewer and comparison
 kaggle/         GPU runs that clone this repo: TASK=stand kaggle/run.sh (training), kaggle/run.sh (benchmark)
 colab/          colab-train job k1-getup.yaml + setup_gpu.sh (the get-up training), the benchmark notebook
-assets/K1/      Booster K1 MJCF + meshes
+assets/K1_standard/  Booster's standard K1 MJCF + meshes (the plant's model); assets/K1/: an older variant with hands
 docs/           figures used in this README
 ```
 
@@ -195,6 +198,7 @@ plant.ph_matrices()                   # explicit J, D, G, ∇H for robot 0
 | `ph_k1/motors.py` | 22 DC motors from the datasheet torque–speed curves |
 | `ph_k1/contact.py` | Contact and end-stop parameters |
 | `ph_k1/self_contact.py` | Self-collision: spheres on the bodies, pair elements (off by default) |
+| `ph_k1/ball.py` | A ball as pH elements: a free sphere per robot against feet, shanks and the ground (off by default) |
 | `ph_k1/plant.py` | **`K1PHPlant`**: state, `step(volts)`, `energy()`, energy ledger, `ph_matrices()` |
 | `ph_k1/drive.py` | Classical servo of the physics checks: target angles → volts (not the robot's path) |
 | `ph_k1/robot_params.py` | Per-robot parameter rows `plant.robot_params` (B, 49): factors on the contact constants, added joint damping, factors on the torque ceilings; for domain randomisation and system identification (`../Model Based RL`) |
@@ -204,12 +208,16 @@ plant.ph_matrices()                   # explicit J, D, G, ∇H for robot 0
 | `ph_k1/render.py` | Viewer (drawing only) and energy-tank plots |
 | `ph_k1_cuda/` | The plant and command path in C++ (one source for CPU and CUDA), its build and tests |
 | `validation/checks.py` | Validation suite |
+| `validation/ball_vs_mujoco.py` | The plant's ball against MuJoCo's: drop, roll, and a leg swing through the ball |
 | `examples/` | Hand-commanded experiments: `play_volts.py`, `hold_pose.py`, `servo_video.py` (servo hold video for W&B) |
 | `benchmarks/` | Speed of the plant (`benchmark_ph.py --impl torch\|native`), MJX on the same robot (`benchmark_mjx.py`) |
 | `rl/common/` | PPO harness shared by the skills (W&B, time-based checkpoints and videos, clean stop, resume with the curriculum) and the `.bin` format |
 | `rl/stand/` | **Stand policy** on the pH plant, as the firmware's `stand` agent: env, rsl-rl training (Kaggle), export to the robot's `.bin`, MuJoCo check |
 | `rl/getup/` | **Get-up policy** with a port-Hamiltonian controller (targets + stiffness + damping, energy tank) and pH rewards: env, training by time (Colab), MuJoCo check, the firmware agent it needs |
-| `assets/K1/` | Booster K1 MJCF and meshes; `K1_22dof_mjx_prims.xml` = primitive collisions for MJX |
+| `rl/kick/` | **Walk and kick** on the pH plant with its ball, as the firmware's `kick_walk` agent: env, evaluation of MuJoCo-trained kick policies, the Hamiltonian figure, PPO training |
+| `rl/walk/` | A trained walking policy on the pH plant and on MuJoCo with the same command path: slider viewer, comparison report |
+| `assets/K1_standard/` | **The plant's robot model**: Booster's standard `K1_22dof.xml` with meshes, as K1_Deploy's twin installs it (`manifest.json`: upstream revision and file hashes) |
+| `assets/K1/` | An older variant of the model (hand collision meshes, hand-tip bodies, other joint ranges): the plant's model until 15 Nov 2026, kept to reproduce earlier runs (`ph_k1.model.HAND_XML`); `K1_22dof_mjx_prims.xml` = primitive collisions for MJX |
 | `kaggle/`, `colab/` | GPU runs that clone this repo: the benchmark (`kaggle/run.sh`, Colab notebook), the stand training (`TASK=stand kaggle/run.sh`), the get-up training (`colab/k1-getup.yaml` for colab-train) |
 | `docs/` | Figures and notes |
 
@@ -258,11 +266,22 @@ round-off): ~30 µs per step for one robot, ~8–9 thousand policy steps/s on th
 - **Self-collision is simplified and off by default.** `SelfContactParams(enabled=True)` (`ph_k1/self_contact.py`, on in
   `rl/getup`) puts spheres on the bodies and a unilateral spring + damper on every overlapping pair of non-neighbours,
   integrated implicitly like the ground. No friction between limbs, and the spheres only approximate the parts.
-- **End stops wider than the MJCF range.** The MJCF range is the firmware's command clamp
-  (K1_Deploy `k1_config.h` has the same numbers). The real K1 went past it in its get-ups (head
-  yaw +0.34 rad, elbow yaw ±0.2, ankle roll +0.16, hip roll ±0.1; the logs `getup_2236.csv`, `getup_front_2250.csv`),
-  so the end-stop springs sit at the MJCF range ± 0.15 rad (the firmware's own range-check tolerance)
-  and at least 0.05 rad past the measured extremes (`ph_k1/model.py` `MEASURED_RANGE`).
+- **Robot model.** The plant reads Booster's standard `K1_22dof.xml` (`assets/K1_standard/`). Until 15 Nov 2026 it
+  read an older variant (`assets/K1/`: 24 convex hand collision meshes instead of 2, hand-tip bodies, other joint
+  ranges on 18 of 22 joints). Masses, inertias, link offsets and the joint order are the same in both, so walking
+  and standing are not affected; anything that touched the floor with a hand or went near a joint limit is (the
+  get-up runs and the fit to the get-up logs in `../Model Based RL` were made with the older model).
+- **Three ranges per joint.** The command clamp (`model.jnt_low/high`) is the firmware's (K1_Deploy `k1_config.h`;
+  the same numbers as the older MJCF). The standard MJCF's own ranges are wider at the elbows and the knee
+  (`model.mjcf_low/high`). The end-stop springs sit at the wider of the two ± 0.15 rad (the firmware's own
+  range-check tolerance) and at least 0.05 rad past what the real K1 reached in its get-ups (head yaw +0.34 rad
+  past the clamp, elbow yaw ±0.2, ankle roll +0.16, hip roll ±0.1; `ph_k1/model.py` `MEASURED_RANGE`).
+- **The ball is set against MuJoCo, not against the real ball.** `ph_k1/ball.py`: stiffness, dampers, friction and
+  rolling resistance are chosen so that a drop, a roll and a leg swing through the ball come out as with K1_Deploy's
+  twin ball (`validation/ball_vs_mujoco.py`: roll identical, total ball speed of a leg swing within 13 %). During
+  the kick MuJoCo lifts the ball more (2-5 m/s upwards against 0.5-1.4); the difference comes from MuJoCo's
+  ball-ground contact while the foot pushes (without a floor the two agree). The ball touches only the boxes of
+  the feet and shanks.
 - **Command path = the robot's, delay not identified.** Policies command 22 joint angles; volts stay
   inside the simulator. `ph_k1/firmware.py` copies the K1_Deploy chain (position clamp, slew, target
   clamp, overspeed guard once per 20 ms; the target is held; motor-driver PD every step). The transport
@@ -299,6 +318,6 @@ out H, J, D and G for the full robot and integrates them.
 **RL on the plant (`rl/`):** the robot has no voltage input, so a policy commands what the real K1
 takes: 22 joint targets at 50 Hz, through the firmware command path inside the plant. The volts stay in
 the simulator, and so does the energy ledger, which the reward can use (`rl/stand`: copper loss R·i²).
-See `rl/stand/README.md` and `rl/getup/README.md`.
+See `rl/stand/README.md`, `rl/getup/README.md` and `rl/kick/README.md`.
 
-The Booster K1 model files in `assets/K1/` come from Booster Robotics.
+The Booster K1 model files in `assets/K1_standard/` (BSD-3-Clause, `LICENSE` there) and `assets/K1/` come from Booster Robotics.
