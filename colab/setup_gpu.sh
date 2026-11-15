@@ -38,5 +38,5 @@ for name, fn in (("linalg.solve", lambda: torch.linalg.solve(A, b)), ("cholesky"
         break
 PROBE
 fi
-PH_TEST_DEVICE="${PH_TEST_DEVICE:-cuda}" $PY -m pytest ph_k1_cuda/tests rl/getup/tests -q -p no:cacheprovider
+PH_TEST_DEVICE="${PH_TEST_DEVICE:-cuda}" $PY -m pytest ph_k1_cuda/tests rl/getup/tests rl/stand/tests rl/kick/tests -q -p no:cacheprovider
 echo "[setup] GPU tests passed"

@@ -41,18 +41,28 @@ class VideoRecorder:
         self.size = (width, height)
         self.view = (distance, azimuth, elevation)
         self.frames: list[np.ndarray] = []
+        self.balls: list[np.ndarray] = []    # the ball's centre per frame, if the plant has a ball
+        self.arrows: list[np.ndarray] = []   # (6,) start and end of an arrow on the floor per frame (or NaN)
+        self.has_ball = bool(getattr(getattr(plant, "ball_params", None), "enabled", False))
 
-    def capture(self) -> None:
+    def capture(self, arrow=None) -> None:
+        """Keep this pose.  arrow: (6,) start and end (world) of an arrow to draw in this frame, e.g. a kick direction."""
         self.frames.append(self.plant.q[self.b].detach().to("cpu").double().numpy().copy())
+        if self.has_ball:
+            self.balls.append(self.plant.ball[self.b, :3].detach().to("cpu").double().numpy().copy())
+        self.arrows.append(np.full(6, np.nan) if arrow is None else np.asarray(arrow, dtype=float).reshape(6))
 
     def save(self, path: str | Path, timeout: float = 600.0) -> Path:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory() as tmp:
             npz = Path(tmp) / "frames.npz"
+            extra = {"arrow": np.stack(self.arrows)}
+            if self.has_ball:
+                extra.update(ball=np.stack(self.balls), ball_radius=float(self.plant.ball_params.radius))
             np.savez(npz, qpos=np.stack(self.frames), xml=str(self.plant.model.xml_path), fps=self.fps,
                      width=self.size[0], height=self.size[1], distance=self.view[0], azimuth=self.view[1],
-                     elevation=self.view[2])
+                     elevation=self.view[2], **extra)
             r = subprocess.run([sys.executable, str(RENDERER), str(npz), str(path)], capture_output=True, text=True,
                                timeout=timeout)
         if r.returncode != 0 or not path.exists():

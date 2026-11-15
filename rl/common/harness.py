@@ -161,6 +161,17 @@ class VideoMaker:
         self.broken = False
         self.policy_device = None  # set by train(): where the policy runs
 
+    def on_start(self, env, it: int) -> None:
+        """A subclass: called after prepare, before the first step."""
+
+    def on_step(self, env, rec) -> None:
+        """A subclass may record more per step (it must then call rec.capture itself)."""
+        rec.capture()
+
+    def on_end(self, env, path: Path, it: int):
+        """A subclass may return (path, {W&B key: image file})."""
+        return path
+
     def __call__(self, policy, it: int) -> Path | None:
         if self.broken:
             return None
@@ -177,12 +188,13 @@ class VideoMaker:
                 rec = VideoRecorder(env.plant, fps=self.fps)
                 to_policy = (lambda o: o) if self.policy_device is None else (lambda o: o.to(self.policy_device))
                 obs = env.get_observations()
+                self.on_start(env, it)
                 for _ in range(self.steps):
                     obs, _, _, _ = env.step(policy(to_policy(obs)))
-                    rec.capture()
+                    self.on_step(env, rec)
             path = rec.save(self.out_dir / f"{self.prefix}_{it:05d}.mp4")
             rec.close()
-            return path
+            return self.on_end(env, path, it)
         except Exception as exc:  # no EGL/OSMesa or no MP4 writer: train on, without videos
             print(f"[video] switched off: {type(exc).__name__}: {exc}", flush=True)
             self.broken = True
@@ -220,14 +232,15 @@ def action_std(policy) -> torch.Tensor | None:
 
 def train(env, args, *, tag: str, hidden_dims, export: Callable | None = None, video: VideoMaker | None = None,
           evaluate: Callable | None = None, artifact: str | None = None, artifact_meta: dict | None = None,
-          ppo: dict | None = None, before_learn: Callable | None = None) -> Path:
+          ppo: dict | None = None, before_learn: Callable | None = None, on_log: Callable | None = None) -> Path:
     """Run PPO on env with the flags of add_arguments; returns the run folder.
 
     export(checkpoint_path, out_path) writes the firmware file; artifact: W&B artifact name for the final
     deploy.bin + checkpoint.  evaluate(policy, it) -> {name: number}: run every --eval-every-min minutes with the
     deterministic policy (no action noise), logged at that iteration.  An env with locked_actions() -> (num_actions,)
     bool gets the std of those outputs held at --init-std.  before_learn(runner, resumed: bool): called once after
-    the runner is built (and a checkpoint loaded), before PPO starts, e.g. to warm-start the actor by imitation."""
+    the runner is built (and a checkpoint loaded), before PPO starts, e.g. to warm-start the actor by imitation; the
+    time budget counts it.  on_log(writer, it): called at every iteration's log (the W&B run exists then)."""
     from rsl_rl.runners import OnPolicyRunner
 
     if not args.no_wandb:
@@ -252,11 +265,10 @@ def train(env, args, *, tag: str, hidden_dims, export: Callable | None = None, v
             hold_locked_std(runner.alg.get_policy(), env.locked_actions(), args.init_std)
 
     hold_std()  # a resumed run: before its first rollout
+    budget_min = max(args.max_minutes, 60.0 * args.hours)
+    t0 = time.time()  # the time budget counts the warm start too (getup-mbrl-v2: 50 min of DAgger were not counted)
     if before_learn is not None:
         before_learn(runner, bool(args.resume))
-
-    budget_min = max(args.max_minutes, 60.0 * args.hours)
-    t0 = time.time()
     state = {"last_save": t0, "last_video": t0, "last_eval": t0, "reason": None, "sigint": False, "run_id": None}
     if args.first_video_min > 0:  # an early video proves the video path works
         state["last_video"] = t0 - max(args.video_every_min - args.first_video_min, 0.0) * 60
@@ -291,8 +303,19 @@ def train(env, args, *, tag: str, hidden_dims, export: Callable | None = None, v
         video.policy_device = env.device
         path = video(policy, it)
         runner.alg.train_mode()
+        images = {}
+        if isinstance(path, tuple):  # (mp4, {W&B key: image file}): figures made from the same rollout
+            path, images = path
         if path:
             print(f"[video] {path.name}", flush=True)
+        if images and not args.no_wandb:
+            try:
+                import wandb
+
+                if wandb.run is not None:
+                    wandb.log({k: wandb.Image(str(v)) for k, v in images.items()}, step=it)
+            except Exception as exc:  # a figure must never end a training
+                print(f"[video] figures not logged: {type(exc).__name__}: {exc}", flush=True)
 
     def run_eval(it):
         policy = runner.get_inference_policy(device=str(env.device))
@@ -349,6 +372,8 @@ def train(env, args, *, tag: str, hidden_dims, export: Callable | None = None, v
                     state["run_id"] = wandb.run.id
             except Exception:
                 pass
+        if on_log is not None and runner.logger.writer is not None:
+            on_log(runner.logger.writer, it)
         log(*a, **kw)
         if (args.save_every_min > 0 and not stopping and runner.logger.writer is not None
                 and (time.time() - state["last_save"]) / 60 >= args.save_every_min):
