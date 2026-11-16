@@ -33,6 +33,7 @@ import torch
 from . import servo
 from .drive import GAINS, _group
 from .model import NB, NJ, K1Model
+from .solve import solve as ph_solve
 
 # ---------------------------------------------------------------- K1_Deploy firmware/include/k1_config.h
 # Joint order of the firmware = MJCF order.  The position tables are the plant's command clamp (model.jnt_low/high);
@@ -181,7 +182,7 @@ def imu_step(plant, kin_n, nu_n):
     """
     f = plant.free
     nu1 = torch.zeros_like(nu_n)
-    nu1[:, f] = torch.linalg.solve(kin_n.M[:, f][:, :, f], plant.p[:, f])  # p_{n+1} = M(q_n) nu_{n+1}
+    nu1[:, f] = ph_solve(kin_n.M[:, f][:, :, f], plant.p[:, f])  # p_{n+1} = M(q_n) nu_{n+1}
     w1, v1, v0 = nu1[:, :3], nu1[:, 3:6], nu_n[:, 3:6]
     acc = (v1 - v0) / plant.h + torch.cross(w1, v1, dim=-1)
     if plant.gravity:

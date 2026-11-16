@@ -62,6 +62,7 @@ from .motors import MotorBank, build_motors
 from .robot_params import Effective, effective
 from . import ball as bl
 from . import self_contact as sc
+from .solve import solve as ph_solve
 from .spatial import quat_exp, quat_mul, quat_rate_matrix
 
 TIMESTEP = 1e-3
@@ -210,7 +211,7 @@ class K1PHPlant:
         kin = kin or self.kinematics()
         f = self.free
         nu = torch.zeros_like(self.p)
-        nu[:, f] = torch.linalg.solve(kin.M[:, f][:, :, f], self.p[:, f])
+        nu[:, f] = ph_solve(kin.M[:, f][:, :, f], self.p[:, f])
         return nu
 
     @property
@@ -239,7 +240,7 @@ class K1PHPlant:
         kin = kin or forward_kinematics(m, q)
         f = self.free
         nu = torch.zeros_like(p)
-        nu[:, f] = torch.linalg.solve(kin.M[:, f][:, :, f], p[:, f])
+        nu[:, f] = ph_solve(kin.M[:, f][:, :, f], p[:, f])
         theta = q[:, 7:]
         out = {"kinetic": 0.5 * (p * nu).sum(-1)}
         zeros_b = torch.zeros(q.shape[0], dtype=self.dtype, device=self.device)
@@ -397,12 +398,12 @@ class K1PHPlant:
             E[:, jr, torch.arange(NJ, device=self.device)] = 1.0
             # A^-1 [b1 | B] in one solve (A is SPD).  Not cholesky/cholesky_solve: some CUDA builds of torch lack
             # their kernels for older GPUs (Colab's torch 2.11+cu130 on a T4: "no kernel image"); linalg.solve works.
-            X = torch.linalg.solve(Af, torch.cat((b1[..., None], E), -1))
+            X = ph_solve(Af, torch.cat((b1[..., None], E), -1))
             nu0, Y = X[..., 0], X[..., 1:]  # Y = A^-1 B
             Mj = Y[:, jr]  # B^T A^-1 B
             Ksys = torch.diag_embed(mot.L + h * mot.R) + h * h * Ks[:, :, None] * Mj * Ks[:, None, :]
             rhs = mot.L * i_n + h * v - h * Ks * nu0[:, jr]
-            i1 = torch.linalg.solve(Ksys, rhs)
+            i1 = ph_solve(Ksys, rhs)
             nu_f = nu0 + h * (Y @ (Ks * i1)[..., None]).squeeze(-1)
             nu1 = torch.zeros(B, NV, dtype=self.dtype, device=self.device)
             nu1[:, f] = nu_f
@@ -555,7 +556,7 @@ class K1PHPlant:
             kin = forward_kinematics(m, q)
             Mf = kin.M[:, fr][:, :, fr]
             pf = p[:, fr]
-            T = 0.5 * (pf * torch.linalg.solve(Mf, pf)).sum()
+            T = 0.5 * (pf * ph_solve(Mf, pf)).sum()
             V = gravity_potential(m, kin).sum() if self.gravity else 0.0
             if use_contact:
                 delta = torch.relu(-self._sole_points(kin)[..., 2])
@@ -624,7 +625,7 @@ class K1PHPlant:
 
         # the same x_dot written out term by term (what step() integrates)
         nu = torch.zeros(NV, dtype=dt, device=dev)
-        nu[fr] = torch.linalg.solve(kin.M[0][fr][:, fr], p0[0, fr])
+        nu[fr] = ph_solve(kin.M[0][fr][:, fr], p0[0, fr])
         Fp = torch.zeros(NV, dtype=dt, device=dev)
         if not self.fixed_base:
             Fp[:NB] += base_gyroscopic(p0, nu[None])[0]
