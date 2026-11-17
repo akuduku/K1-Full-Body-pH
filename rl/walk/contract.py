@@ -77,3 +77,38 @@ def fallen(trunk_z: float, quat: np.ndarray) -> bool:
     """The firmware's tilt abort, |roll| or |pitch| beyond TILT_ABORT, or the trunk near the floor."""
     roll, pitch = roll_pitch(quat)
     return trunk_z < FALL_HEIGHT or abs(roll) > TILT_ABORT or abs(pitch) > TILT_ABORT
+
+
+# ------------------------------------------------------------------ the same contract for many robots (torch)
+class Contract:
+    """The sprint agent's observation and action, batched, on one device/dtype (the training environments)."""
+
+    def __init__(self, dtype=None, device="cpu"):
+        import torch
+
+        self.torch = torch
+        dtype = dtype or torch.float32
+        T = lambda a: torch.as_tensor(a, dtype=dtype, device=device)  # noqa: E731
+        self.home, self.action_scale = T(HOME), T(ACTION_SCALE)
+        self.twist_low, self.twist_high = T(TWIST_LOW), T(TWIST_HIGH)
+
+    def projected_gravity(self, quat):
+        """Unit gravity in the trunk frame, R^T (0, 0, -1), from the trunk quaternion (B,4) w x y z."""
+        w, x, y, z = quat.unbind(-1)
+        return self.torch.stack((-2 * (x * z - w * y), -2 * (y * z + w * x), -(1 - 2 * (x * x + y * y))), -1)
+
+    def roll_pitch(self, quat):
+        """(B,2) roll and pitch of the trunk, ZYX Euler angles as the IMU reports them (the firmware's tilt abort)."""
+        t = self.torch
+        w, x, y, z = quat.unbind(-1)
+        return t.stack((t.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)),
+                        t.asin((2 * (w * y - z * x)).clamp(-1.0, 1.0))), -1)
+
+    def observe(self, gyro, gravity, theta, qd, last_action, twist):
+        """(B,75): gyro | gravity | theta - HOME | qd | last action | twist (clipped to the firmware's limits)."""
+        twist = self.torch.minimum(self.torch.maximum(twist, self.twist_low), self.twist_high)
+        return self.torch.cat((gyro, gravity, theta - self.home, qd, last_action, twist), -1)
+
+    def decode(self, actions):
+        """(B,22) raw policy output -> joint targets HOME + 0.25 * effort / kp * a (the firmware's clamp follows)."""
+        return self.home + self.action_scale * actions
