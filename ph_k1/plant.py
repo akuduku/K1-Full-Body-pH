@@ -529,6 +529,7 @@ class K1PHPlant:
             contact_force=f_contact,
             contact_active=normal_on,
             slipping=slip_mask(normal_on, stick_on),
+            extra={"nu": nu1},   # the step's velocity nu_{n+1} (p = M(q_n) nu_{n+1}); K1PHPlantNative reports the same
         )
 
     # ------------------------------------------------------- the pH matrices
