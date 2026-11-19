@@ -29,6 +29,12 @@ Different from Eric's environment, and why:
   * the foot height is the lowest point of his 5 x 3 sole grid, the foot contact comes from the plant's 4 sole
     points per foot; the hand tips are 0.203 m along the hand link (his body left_hand_end_ball).
   * his top-speed curriculum gate is not here: `top_speed` and `command_scale` are set by the training.
+
+Added for a gradient learner, off unless asked for (STAND_INS): `air_time_smooth`, a smooth stand-in for his
+`air_time`.  `air_time` counts feet in the air (yes/no), so its derivative is zero and a learner that follows
+derivatives never sees that lifting a foot pays.  The stand-in pays for the weight a foot has taken off the ground,
+with his 0.5 s limit (on a clock of its own: the time the foot has been nearly without weight, touching or not)
+and his request gate.  Eric's own terms, and so the full reward that is logged and scored, stay as they are.
 """
 
 from __future__ import annotations
@@ -40,7 +46,7 @@ from dataclasses import dataclass, field
 import torch
 
 from ph_k1 import firmware as fw
-from ph_k1.dynamics import Kinematics, body_twists, forward_kinematics
+from ph_k1.dynamics import GRAVITY, Kinematics, body_twists, forward_kinematics
 from ph_k1.model import K1Model
 from rl.kick.contract import rotate, to_heading, wrap, yaw_of
 
@@ -90,8 +96,12 @@ REWARDS = {
     "energy": -0.002,            # per watt of electrical power drawn from the battery (pH ledger); not in Eric's task
 }
 LEFT_OUT = {"self_collisions": -1.0}                 # Eric's terms the pH plant cannot report
-OPTIONAL = ("forward_lean", "backward_lean")         # k1_sprint's "lean" variant: weights -20 and as given
+OPTIONAL = ("forward_lean", "backward_lean", "air_time_smooth")   # off unless asked for: k1_sprint's "lean" variant
+                                                                 # (weights -20 and as given); air_time's stand-in
 COUNTS = ("air_time", "terminated")                  # terms that only count events: no derivative at all
+# smooth stand-ins of counting terms for a gradient learner (Model Based RL mbrl/grad): the same idea with a slope.
+# Not Eric's terms: a learner that adds one still logs, and is scored on, Eric's full reward.
+STAND_INS = {"air_time_smooth": "air_time"}
 FLOAT_MEMORY = ("swing_peak", "yaw_rate_avg", "velocity_avg", "heading_reference")   # memory a derivative flows through
 
 
@@ -219,6 +229,7 @@ class WalkTask:
         mid, half = 0.5 * (m.mjcf_low + m.mjcf_high), 0.5 * (m.mjcf_high - m.mjcf_low)
         self.soft_low, self.soft_high = mid - p.soft_limit_factor * half, mid + p.soft_limit_factor * half
         self.upright_std = T(p.upright_std)
+        self.half_weight = -0.5 * GRAVITY[2] * float(m.mass.sum())       # [N] what each foot carries in a quiet stance
 
         names = m.body_names
         self.feet = [names.index("left_foot_link"), names.index("right_foot_link")]
@@ -295,7 +306,7 @@ class WalkTask:
                "command_counter": torch.zeros(B, dtype=torch.long, device=self.device), "command_age": z(),
                "swing_peak": z(2), "yaw_rate_avg": z(), "velocity_avg": z(2), "heading_reference": z(),
                "last_target": torch.full((B, 3), math.nan, dtype=self.dtype, device=self.device),
-               "air_time": z(2), "contact_time": z(2)}
+               "air_time": z(2), "contact_time": z(2), "unloaded_time": z(2)}
         return self.resample(mem, torch.arange(B, device=self.device), rand)
 
     def reset_memory(self, mem: dict, ids: torch.Tensor, rand) -> dict:
@@ -303,7 +314,7 @@ class WalkTask:
         if ids.numel() == 0:
             return mem
         mem = {k: v.clone() for k, v in mem.items()}
-        for k in ("swing_peak", "yaw_rate_avg", "velocity_avg", "air_time", "contact_time"):
+        for k in ("swing_peak", "yaw_rate_avg", "velocity_avg", "air_time", "contact_time", "unloaded_time"):
             mem[k][ids] = 0.0
         mem["last_target"][ids] = math.nan
         mem["command_counter"][ids] = 0
@@ -447,6 +458,17 @@ class WalkTask:
         if "air_time" in want:
             low, high = p.air_time_range
             t["air_time"] = f((air_time > low) & (air_time < high)).sum(1) * f(total > 0.2)
+        if "air_time_smooth" in want:       # air_time's stand-in (STAND_INS): the weight a foot has taken off the ground,
+            # 0 while it carries half the robot or more, 1 when the ground carries none of it; air_time's 0.5 s limit
+            # and request gate.  The ground force has a derivative (the plant's contact spring), so the first part of a
+            # step, the weight moving onto the other foot, pays a little more at every newton.  The limit runs on a
+            # clock of its own, the time the foot has carried less than a quarter of the robot: air_time's clock
+            # stops while a foot touches, and a foot resting on the floor without weight would pay for ever (standing
+            # on one leg).  Walking is not touched by it: a swing lasts well under 0.5 s.
+            unload = (1.0 - s.contact_force[..., 2] / self.half_weight).clamp(0.0, 1.0)
+            unloaded = torch.where(unload.detach() > 0.5, mem["unloaded_time"] + dt, torch.zeros_like(unload.detach()))
+            new["unloaded_time"] = unloaded
+            t["air_time_smooth"] = (unload * f(unloaded < p.air_time_range[1])).sum(1) * f(total > 0.2)
         if "foot_clearance" in want:
             cost = ((s.foot_height - swing_target[:, None]).abs() * foot_speed).sum(1)
             t["foot_clearance"] = cost * f(speed > 0.05) / speed.clamp(min=1.0)
