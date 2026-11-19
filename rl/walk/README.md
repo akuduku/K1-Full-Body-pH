@@ -37,6 +37,11 @@ Python plant is `mbrl/grad/walk_env.py` in `Model Based RL`.
 
     python rl/walk/evaluate.py --policy walk_v9 -B 64 [--quiet]      # pH plant: falls, speed error, power per command
     python rl/walk/eval_mujoco.py --policy walk_v9 [--push 0.3]      # the same policy file in MuJoCo, one robot
+    python rl/walk/export.py logs/<run>/model_100.pt                 # checkpoint -> the sprint agent's .bin (75 -> 22)
+
+`evaluate.py` `WalkEval` is the evaluation inside a training loop: the six fixed commands under the training's
+conditions, the same at every evaluation (`Model Based RL` `mbrl/grad/train.py --task walk` uses it).  The robot's
+sprint agent (`K1_Deploy` `firmware/src/agents/sprint.cpp`) loads the `.bin` that `export.py` writes.
 
 Eric's `walk_v9` in this environment (16 robots, 10 s per command, quiet), a check of the environment: no falls on
 stand, 0.5 and 1.0 m/s forward, 0.5 m/s back, 0.5 m/s sideways and a turn of 1 rad/s; speed error 0.05 to 0.10 m/s;
@@ -50,6 +55,7 @@ stand, 0.5 and 1.0 m/s forward, 0.5 m/s back, 0.5 m/s sideways and a turn of 1 r
 - `compare.py`: the scenarios, metrics and report
 - `task.py`: the walk task (rewards, commands, what the rewards read from the plant)
 - `env.py`: `WalkEnv`, the task on the C++ plant; `evaluate.py`, `eval_mujoco.py`: scoring
+- `export.py`: checkpoint -> the firmware sprint agent's policy file
 - `tests/test_walk_env.py`: the task's signals against MuJoCo, single reward terms against Eric's formulas, the
-  environment with `walk_v9`
+  environment with `walk_v9`, the export round trip, `WalkEval`
 - `tests/test_walk.py`: `python -m pytest rl/walk/tests -q`; `PH_TEST_DISPLAY=1` also opens the slider panel

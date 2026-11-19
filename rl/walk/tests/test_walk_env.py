@@ -283,3 +283,57 @@ def test_a_snapshot_continues_as_the_original():
     env.restore(snap)
     second = [env.step(a)[1].clone() for a in acts[10:]]
     assert torch.equal(torch.stack(first), torch.stack(second)) and torch.equal(q_end, env.plant.q)
+
+
+def test_export_round_trip(tmp_path):
+    """The sprint agent's file read back and run with the firmware's forward pass == the rsl-rl actor."""
+    pytest.importorskip("rsl_rl")
+    from tensordict import TensorDict
+
+    from rl.walk.export import HIDDEN_DIMS, bin_policy, export_bin, read_bin
+    from rsl_rl.models import MLPModel
+
+    torch.manual_seed(1)
+    obs = TensorDict({"policy": torch.randn(64, C.OBS_DIM)}, batch_size=[64])
+    actor = MLPModel(obs, {"actor": ["policy"]}, "actor", C.NJ, hidden_dims=list(HIDDEN_DIMS),
+                     activation="elu", obs_normalization=True,
+                     distribution_cfg={"class_name": "GaussianDistribution", "init_std": 0.5})
+    for _ in range(3):  # give the normalizer non-trivial statistics
+        actor.update_normalization(TensorDict({"policy": 3 * torch.randn(256, C.OBS_DIM) + 1}, batch_size=[256]))
+    with torch.no_grad():
+        for prm in actor.parameters():
+            prm.add_(0.1 * torch.randn_like(prm))
+    ck = tmp_path / "model_7.pt"
+    torch.save({"actor_state_dict": actor.state_dict()}, ck)
+    mats = read_bin(export_bin(ck, tmp_path / "deploy_7.bin"))
+    assert mats["actor.0.weight"].shape == (512, C.OBS_DIM) and mats["actor.6.weight"].shape == (C.NJ, 128)
+    actor.eval()
+    with torch.no_grad():
+        want = actor(obs).double().numpy()
+    assert np.abs(bin_policy(mats)(obs["policy"].double().numpy()) - want).max() < 1e-5
+    bad = tmp_path / "model_stand.pt"                          # a stand policy (72 inputs) is refused
+    torch.save({"actor_state_dict": {k: (v[:, :72] if k == "mlp.0.weight" else v) for k, v in actor.state_dict().items()}}, bad)
+    with pytest.raises(ValueError):
+        export_bin(bad, tmp_path / "deploy_bad.bin")
+
+
+def test_the_evaluation_reports_every_fixed_command():
+    """WalkEval: the same commands at every evaluation, each reported and averaged.  The home pose with no action
+    tips over within 2 s (the sprint's home pose is not stable by itself); Eric's walk_v9 stands and walks."""
+    from rl.walk.env import WalkConfig, quiet
+    from rl.walk.evaluate import WalkEval, load
+
+    commands = ((0.0, 0.0, 0.0), (0.5, 0.0, 0.0))
+    ev = WalkEval(quiet(WalkConfig(num_envs=2, device="cpu", dtype="float32", seed=3)), robots=2, seconds=3.0,
+                  commands=commands)
+    out = ev(lambda o: torch.zeros(o["policy"].shape[0], 22))
+    assert {"Eval/fell", "Eval/watts", "Eval/speed_error", "Eval/yaw_rate_error", "Eval/stood_s"} <= set(out)
+    assert out["Eval/fell"] == pytest.approx((out["EvalCommand/stand/fell"] + out["EvalCommand/fwd0.5/fell"]) / 2)
+    assert out["EvalCommand/stand/stood_s"] < 3.0                   # it tipped over
+    if not (CHECKPOINTS / "walk_v9.pt").exists():
+        pytest.skip("k1_sprint is not next to this repository")
+    out = ev(load("walk_v9", ev.env))                            # ev.env: built by the first call
+    assert out["EvalCommand/stand/fell"] == 0.0 and out["EvalCommand/fwd0.5/fell"] == 0.0
+    assert out["EvalCommand/stand/speed_error"] < 0.1 and out["EvalCommand/fwd0.5/speed_error"] < 0.15
+    assert out["Eval/speed_error"] == pytest.approx((out["EvalCommand/stand/speed_error"]
+                                                     + out["EvalCommand/fwd0.5/speed_error"]) / 2)

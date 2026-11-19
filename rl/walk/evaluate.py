@@ -65,23 +65,47 @@ def play(env: WalkEnv, policy, command=None, seconds: float = 10.0, settle: floa
             "joule_per_m": power / speed if speed > 0.1 else float("nan"), "robots": B, "seconds": steps * dt}
 
 
-class WalkEval:
-    """evaluate(policy, it) for a training loop: one episode on `robots` robots with the task's random commands under
-    the training's conditions, and one without disturbances."""
+def command_name(command) -> str:
+    """(vx, vy, wz) -> a short name for logs: stand, fwd0.5, back0.5, side0.5, turn1.0, or vx_vy_wz."""
+    vx, vy, wz = (float(v) for v in command)
+    if vx == vy == wz == 0.0:
+        return "stand"
+    if vy == wz == 0.0:
+        return f"{'fwd' if vx > 0 else 'back'}{abs(vx):g}"
+    if vx == wz == 0.0:
+        return f"side{vy:g}"
+    if vx == vy == 0.0:
+        return f"turn{wz:g}"
+    return f"{vx:g}_{vy:g}_{wz:g}"
 
-    def __init__(self, cfg: WalkConfig, robots: int = 64, device: str = "cpu", seconds: float = 10.0):
-        self.cfgs = {"": replace(cfg, num_envs=robots, device=device, seed=cfg.seed + 7),
-                     "quiet_": quiet(cfg, num_envs=robots, device=device, seed=cfg.seed + 8)}
-        self.envs, self.seconds = {}, seconds
+
+class WalkEval:
+    """evaluate(policy, it) for a training loop: one episode per fixed command (COMMANDS: stand, walk 0.5 and 1.0 m/s,
+    back, sidestep, turn) on `robots` robots under the training's conditions (pushes, noise, gain errors, delays).
+    Fixed commands, so evaluations stay comparable while a curriculum changes what the training asks for.
+
+    -> Eval/fell, Eval/speed_error, Eval/yaw_rate_error, Eval/watts, Eval/stood_s (means over the commands) and
+    EvalCommand/<name>/<number> per command."""
+
+    def __init__(self, cfg: WalkConfig, robots: int = 64, device: str = "cpu", seconds: float = 10.0,
+                 commands=COMMANDS):
+        self.cfg = replace(cfg, num_envs=robots, device=device, seed=cfg.seed + 7)
+        self.env, self.seconds, self.commands = None, seconds, tuple(commands)
 
     def __call__(self, policy, it: int = 0) -> dict:
-        out = {}
+        if self.env is None:
+            self.env = WalkEnv(self.cfg)
+        keys = ("fell", "stood_s", "speed_error", "yaw_rate_error", "watts")
+        out, per = {}, {k: [] for k in keys}
         with torch.no_grad():
-            for tag, cfg in self.cfgs.items():
-                if tag not in self.envs:
-                    self.envs[tag] = WalkEnv(cfg)
-                r = play(self.envs[tag], policy, None, self.seconds)
-                out.update({f"Eval/{tag}{k}": r[k] for k in ("fell", "stood_s", "speed_error", "yaw_rate_error", "watts")})
+            for command in self.commands:
+                r = play(self.env, policy, command, self.seconds)
+                for k in keys:
+                    out[f"EvalCommand/{command_name(command)}/{k}"] = r[k]
+                    if r[k] == r[k]:                # a NaN (everybody fell before the first 2 s) is not averaged
+                        per[k].append(r[k])
+        for k in keys:
+            out[f"Eval/{k}"] = sum(per[k]) / len(per[k]) if per[k] else float("nan")
         return out
 
 
