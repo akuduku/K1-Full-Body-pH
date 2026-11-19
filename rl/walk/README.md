@@ -56,6 +56,9 @@ stand, 0.5 and 1.0 m/s forward, 0.5 m/s back, 0.5 m/s sideways and a turn of 1 r
 - `task.py`: the walk task (rewards, commands, what the rewards read from the plant)
 - `env.py`: `WalkEnv`, the task on the C++ plant; `evaluate.py`, `eval_mujoco.py`: scoring
 - `export.py`: checkpoint -> the firmware sprint agent's policy file
+- `video.py`: a video of a walk policy for W&B (one quiet episode, the requests changing, the request as an arrow)
+  with `hamiltonian.py`'s figure of the same episode: the tanks of H and the closed-loop H_d, the energy ledger,
+  H_d over (angle, momentum) of the left knee and hip
 - `tests/test_walk_env.py`: the task's signals against MuJoCo, single reward terms against Eric's formulas, the
   environment with `walk_v9`, the export round trip, `WalkEval`
 - `tests/test_walk.py`: `python -m pytest rl/walk/tests -q`; `PH_TEST_DISPLAY=1` also opens the slider panel

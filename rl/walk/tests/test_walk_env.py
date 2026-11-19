@@ -317,6 +317,38 @@ def test_export_round_trip(tmp_path):
         export_bin(bad, tmp_path / "deploy_bad.bin")
 
 
+def ledger_gap(amplitude: float, steps: int = 40):
+    """One quiet episode as rl/walk/video.py records it (without filming), random joint targets of this size.
+    -> (supplied, heat, change of H, the recorder) [J]."""
+    from rl.walk.hamiltonian import Recorder
+
+    env = walk_env(robots=1, fixed_command=(0.0, 0.0, 0.0))
+    env._reset_idx(torch.arange(1))
+    rec = Recorder(env)
+    rec.capture(0.0)
+    gen = torch.Generator().manual_seed(1)
+    for i in range(steps):
+        env.step(amplitude * torch.randn(1, 22, generator=gen))
+        rec.capture((i + 1) * C.POLICY_DT)
+    first, last = rec.rows[0], rec.rows[-1]
+    heat = sum(last[f"L_{k}"] - first[f"L_{k}"] for k in ("copper", "gearbox", "stops", "contact"))
+    return last["L_supplied"] - first["L_supplied"], heat, last["H_total"] - first["H_total"], rec
+
+
+def test_the_ledger_and_the_hamiltonian_figure(tmp_path):
+    """Smooth targets: the energy supplied is the heat plus the change of H (the ledger closes).  Jumping targets: the
+    plant's implicit Euler step damps the fast current changes, which the ledger does not book (1/2 L di^2 per step,
+    checked against the gap to 0.006 J); it only ever removes energy.  The figure is drawn."""
+    from rl.walk.hamiltonian import figure
+
+    supplied, heat, stored, _ = ledger_gap(0.0)
+    assert supplied > 5.0 and abs(supplied - heat - stored) < 0.01 * supplied, (supplied, heat, stored)
+    supplied, heat, stored, rec = ledger_gap(0.3)
+    gap = supplied - heat - stored
+    assert 0.0 < gap < supplied, (supplied, heat, stored)
+    assert figure(rec, tmp_path / "h.png", segments=((0.0, "stand"),), grid=9).stat().st_size > 10_000
+
+
 def test_the_evaluation_reports_every_fixed_command():
     """WalkEval: the same commands at every evaluation, each reported and averaged.  The home pose with no action
     tips over within 2 s (the sprint's home pose is not stable by itself); Eric's walk_v9 stands and walks."""
