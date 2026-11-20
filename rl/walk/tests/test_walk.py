@@ -60,6 +60,36 @@ def test_observation_and_decode_match_k1_deploy():
     np.testing.assert_allclose(C.decode(last), agent.decode(last.astype(np.float32)), atol=1e-5)
 
 
+def test_gait_clock_matches_k1_deploy_walk_clock():
+    """The gait clock (W5c): training's two clock inputs equal the twin's walk_clock agent (the firmware's
+    WalkClockAgent) step by step, through standing, walking, a request under the gate, a turn and a slow sidestep."""
+    sprint = deploy_sprint()
+    if not hasattr(sprint, "WalkClock"):
+        pytest.skip("this K1_Deploy has no walk_clock agent (branch walk-clock)")
+    import torch
+    from k1_deploy.agents.base import RobotState
+    from rl.walk.task import WalkTask
+
+    task = WalkTask(load_k1(dtype=torch.float64))
+    agent = sprint.WalkClock()
+    agent.reset()
+    state = RobotState(q=sprint.HOME.copy(), dq=np.zeros(22, np.float32), gyro=np.zeros(3, np.float32),
+                       rpy=np.zeros(3, np.float32))
+    mem = {"gait_phase": torch.zeros(1, dtype=torch.float64)}
+    plan = [(0.0, 0.0, 0.0)] * 3 + [(0.5, 0.0, 0.0)] * 60 + [(0.1, 0.0, 0.0)] * 2 + [(0.0, 0.0, 0.3)] * 5 \
+        + [(0.15, 0.1, 0.0)] * 2 + [(3.5, 0.0, 0.0)] * 3
+    seen = []
+    for cmd in plan:
+        mem["commands"] = torch.tensor([cmd], dtype=torch.float64)
+        ours = task.clock(mem)[0].numpy()
+        theirs = agent.observe(state, np.zeros(22, np.float32), {"twist": np.array(cmd, dtype=np.float32)})[75:77]
+        np.testing.assert_allclose(ours, theirs, atol=1e-5)
+        seen.append(ours)
+        mem["gait_phase"] = task.next_phase(mem)
+    assert np.allclose(seen[3], (0.0, 1.0)) and np.allclose(seen[63], (0.0, 0.0)) and np.allclose(seen[65], (0.0, 1.0))
+    assert np.allclose(seen[70], (0.0, 0.0))               # 0.18 m/s sideways and forward: under the gate
+
+
 def test_projected_gravity_matches_k1_deploy():
     deploy_sprint()
     from k1_deploy.contract import projected_gravity

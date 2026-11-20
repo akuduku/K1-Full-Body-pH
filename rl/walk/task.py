@@ -36,6 +36,10 @@ derivatives never sees that lifting a foot pays.  The stand-in pays for the weig
 and kept off: his 0.05 s minimum (the smallest unload of the last 3 control steps), his 0.5 s limit (counted in
 seconds of unload since the foot last carried nearly its half) and his request gate.  Eric's own terms, and so the
 full reward that is logged and scored, stay as they are.
+
+The gait clock (W5c, also not Eric's; SHAPING): a phase that runs while a move is asked for, as Booster Gym's gait
+cycle.  `clock(mem)` gives the network's two extra inputs (sin and cos, 0 while standing), and the term `gait_clock`
+pays each foot for unloading while the clock says it swings and for carrying while it says it stands.
 """
 
 from __future__ import annotations
@@ -97,12 +101,14 @@ REWARDS = {
     "energy": -0.002,            # per watt of electrical power drawn from the battery (pH ledger); not in Eric's task
 }
 LEFT_OUT = {"self_collisions": -1.0}                 # Eric's terms the pH plant cannot report
-OPTIONAL = ("forward_lean", "backward_lean", "air_time_smooth")   # off unless asked for: k1_sprint's "lean" variant
-                                                                 # (weights -20 and as given); air_time's stand-in
+OPTIONAL = ("forward_lean", "backward_lean", "air_time_smooth", "gait_clock")   # off unless asked for: k1_sprint's
+                                                 # "lean" variant (weights -20 and as given); air_time's stand-in; the clock
 COUNTS = ("air_time", "terminated")                  # terms that only count events: no derivative at all
 # smooth stand-ins of counting terms for a gradient learner (Model Based RL mbrl/grad): the same idea with a slope.
 # Not Eric's terms: a learner that adds one still logs, and is scored on, Eric's full reward.
 STAND_INS = {"air_time_smooth": "air_time"}
+# every term added for a gradient learner: never part of Eric's full reward
+SHAPING = ("air_time_smooth", "gait_clock")
 FLOAT_MEMORY = ("swing_peak", "yaw_rate_avg", "velocity_avg", "heading_reference",   # memory a derivative flows through
                 "unload_history")
 
@@ -136,6 +142,13 @@ class WalkParams:
     # feet
     air_time_range: tuple = (0.05, 0.5)
     unload_reset: float = 0.1            # air_time_smooth (not Eric's): a foot carrying 90 % of its half again ends an unload
+    # the gait clock (not Eric's; W5c), as Booster Gym's gait cycle: a phase that says which foot should be in the air.
+    # Period and swing share are walk_v9's own on the pH plant at 0.5 m/s (a cycle of 0.46 s, each foot 36 % of it in
+    # the air).  It runs while the request asks for a move (speed + |turn rate| above clock_gate), else it is at 0.
+    gait_period: float = 0.46
+    gait_swing: float = 0.36
+    gait_ramp: float = 0.04              # the swing windows' edges, as a share of the cycle
+    clock_gate: float = 0.2              # Eric's request gate of air_time
     toe: tuple = (0.115, 0.0, -0.03)     # toe tip in the foot frame
     toe_clearance: float = 0.04
     touchdown_height: float = 0.08
@@ -312,7 +325,8 @@ class WalkTask:
                "command_counter": torch.zeros(B, dtype=torch.long, device=self.device), "command_age": z(),
                "swing_peak": z(2), "yaw_rate_avg": z(), "velocity_avg": z(2), "heading_reference": z(),
                "last_target": torch.full((B, 3), math.nan, dtype=self.dtype, device=self.device),
-               "air_time": z(2), "contact_time": z(2), "unloaded_time": z(2), "unload_history": z(2, self.hold_steps)}
+               "air_time": z(2), "contact_time": z(2), "unloaded_time": z(2), "unload_history": z(2, self.hold_steps),
+               "gait_phase": z()}
         return self.resample(mem, torch.arange(B, device=self.device), rand)
 
     def reset_memory(self, mem: dict, ids: torch.Tensor, rand) -> dict:
@@ -321,7 +335,7 @@ class WalkTask:
             return mem
         mem = {k: v.clone() for k, v in mem.items()}
         for k in ("swing_peak", "yaw_rate_avg", "velocity_avg", "air_time", "contact_time", "unloaded_time",
-                  "unload_history"):
+                  "unload_history", "gait_phase"):
             mem[k][ids] = 0.0
         mem["last_target"][ids] = math.nan
         mem["command_counter"][ids] = 0
@@ -411,6 +425,35 @@ class WalkTask:
             mem[k] = torch.zeros_like(mem[k])
         return mem
 
+    # ------------------------------------------------------------------ the gait clock (W5c, not Eric's)
+    def clock_on(self, mem: dict) -> torch.Tensor:
+        """(B,) bool: the clock runs while the request (what the network is told) asks for a move, its speed plus
+        |turn rate| above clock_gate.  Asked to stand, the clock's inputs are 0 and its phase is back at 0 (Booster Gym:
+        "for the standing gait, the gait cycle is set to zero")."""
+        c = torch.minimum(torch.maximum(mem["commands"], self.contract.twist_low), self.contract.twist_high)   # as observed
+        return (torch.linalg.vector_norm(c[:, :2], dim=1) + c[:, 2].abs()) > self.p.clock_gate
+
+    def clock(self, mem: dict) -> torch.Tensor:
+        """(B,2) the network's two clock inputs: sin and cos of 2 pi x phase while the clock runs, (0, 0) while it
+        stands.  The firmware's walk_clock agent computes the same from its own tick counter."""
+        angle = 2.0 * math.pi * mem["gait_phase"]
+        return torch.stack((torch.sin(angle), torch.cos(angle)), -1) * self.clock_on(mem)[:, None].to(self.dtype)
+
+    def next_phase(self, mem: dict) -> torch.Tensor:
+        """(B,) the clock's phase at the next control step: one step of its period on while it runs, back to 0 while
+        the robot is asked to stand (the firmware: a step counter, set to 0 while standing)."""
+        phase = mem["gait_phase"]
+        return torch.where(self.clock_on(mem), torch.remainder(phase + self.dt / self.p.gait_period, 1.0),
+                           torch.zeros_like(phase))
+
+    def swing(self, phase: torch.Tensor) -> torch.Tensor:
+        """(B,2) how much of each foot's swing window this phase is in: 1 inside, 0 outside, a ramp gait_ramp wide at
+        the edges.  The left foot swings in [0, gait_swing) of the cycle, the right foot half a cycle later."""
+        p, h = self.p, 0.5 * self.p.gait_swing
+        centre = torch.tensor([h, 0.5 + h], dtype=self.dtype, device=self.device)
+        d = torch.remainder(phase[:, None] - centre + 0.5, 1.0) - 0.5           # signed distance on the circle
+        return ((h - d.abs()) / p.gait_ramp + 0.5).clamp(0.0, 1.0)
+
     # ------------------------------------------------------------------ rewards
     def _regime(self, total, standing, walking, running, running_threshold: float = 1.5):
         if standing.dim() > 0 and standing.shape[-1] > 1:     # per-joint values
@@ -483,6 +526,14 @@ class WalkTask:
             spent = torch.where(u < p.unload_reset, torch.zeros_like(u), mem["unloaded_time"] + u * dt)
             new["unloaded_time"] = spent
             t["air_time_smooth"] = (held.amin(-1) * f(spent < p.air_time_range[1])).sum(1) * f(total > 0.2)
+        if "gait_clock" in want:            # step in time with the clock (W5c; Booster Gym's feet swing, with a slope):
+            # per foot, unload while the clock says it swings, carry while it says it stands, both measured by the
+            # weight on the foot (the stand-in's unload), averaged over the feet; 1 = in time.  Paid at the phase the
+            # network saw for this step, only while the clock runs.  Its slope: weight off for the foot whose turn it
+            # is, weight on for the other.  The clock is time, so the derivative goes through the loads only.
+            unload = (1.0 - s.contact_force[..., 2] / self.half_weight).clamp(0.0, 1.0)
+            sw = self.swing(mem["gait_phase"])
+            t["gait_clock"] = (sw * unload + (1.0 - sw) * (1.0 - unload)).mean(1) * f(self.clock_on(mem))
         if "foot_clearance" in want:
             cost = ((s.foot_height - swing_target[:, None]).abs() * foot_speed).sum(1)
             t["foot_clearance"] = cost * f(speed > 0.05) / speed.clamp(min=1.0)
@@ -570,6 +621,7 @@ class WalkTask:
             t["backward_lean"] = (-s.gravity[:, 0] - p.lean_back).clamp(min=0.0).square()
         if "energy" in want:
             t["energy"] = power_w.clamp(min=0.0)
+        new["gait_phase"] = self.next_phase(mem)       # the gait clock moves on (read only by gait_clock and clock())
         return t, new
 
     def reward(self, terms: dict, only: tuple | None = None) -> torch.Tensor:
