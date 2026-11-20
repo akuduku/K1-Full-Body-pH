@@ -32,9 +32,10 @@ Different from Eric's environment, and why:
 
 Added for a gradient learner, off unless asked for (STAND_INS): `air_time_smooth`, a smooth stand-in for his
 `air_time`.  `air_time` counts feet in the air (yes/no), so its derivative is zero and a learner that follows
-derivatives never sees that lifting a foot pays.  The stand-in pays for the weight a foot has taken off the ground,
-with his 0.5 s limit (on a clock of its own: the time the foot has been nearly without weight, touching or not)
-and his request gate.  Eric's own terms, and so the full reward that is logged and scored, stay as they are.
+derivatives never sees that lifting a foot pays.  The stand-in pays for the weight a foot has taken off the ground
+and kept off: his 0.05 s minimum (the smallest unload of the last 3 control steps), his 0.5 s limit (counted in
+seconds of unload since the foot last carried nearly its half) and his request gate.  Eric's own terms, and so the
+full reward that is logged and scored, stay as they are.
 """
 
 from __future__ import annotations
@@ -102,7 +103,8 @@ COUNTS = ("air_time", "terminated")                  # terms that only count eve
 # smooth stand-ins of counting terms for a gradient learner (Model Based RL mbrl/grad): the same idea with a slope.
 # Not Eric's terms: a learner that adds one still logs, and is scored on, Eric's full reward.
 STAND_INS = {"air_time_smooth": "air_time"}
-FLOAT_MEMORY = ("swing_peak", "yaw_rate_avg", "velocity_avg", "heading_reference")   # memory a derivative flows through
+FLOAT_MEMORY = ("swing_peak", "yaw_rate_avg", "velocity_avg", "heading_reference",   # memory a derivative flows through
+                "unload_history")
 
 
 @dataclass
@@ -133,6 +135,7 @@ class WalkParams:
     soft_limit_factor: float = 0.9       # dof_pos_limits: this share of the MJCF range around its middle
     # feet
     air_time_range: tuple = (0.05, 0.5)
+    unload_reset: float = 0.1            # air_time_smooth (not Eric's): a foot carrying 90 % of its half again ends an unload
     toe: tuple = (0.115, 0.0, -0.03)     # toe tip in the foot frame
     toe_clearance: float = 0.04
     touchdown_height: float = 0.08
@@ -230,6 +233,9 @@ class WalkTask:
         self.soft_low, self.soft_high = mid - p.soft_limit_factor * half, mid + p.soft_limit_factor * half
         self.upright_std = T(p.upright_std)
         self.half_weight = -0.5 * GRAVITY[2] * float(m.mass.sum())       # [N] what each foot carries in a quiet stance
+        # air_time pays from the control step its clock passes the range's start (0.05 s: the 3rd step in the air);
+        # air_time_smooth pays the unload a foot has kept that many steps
+        self.hold_steps = int(p.air_time_range[0] / self.dt + 1e-9) + 1
 
         names = m.body_names
         self.feet = [names.index("left_foot_link"), names.index("right_foot_link")]
@@ -306,7 +312,7 @@ class WalkTask:
                "command_counter": torch.zeros(B, dtype=torch.long, device=self.device), "command_age": z(),
                "swing_peak": z(2), "yaw_rate_avg": z(), "velocity_avg": z(2), "heading_reference": z(),
                "last_target": torch.full((B, 3), math.nan, dtype=self.dtype, device=self.device),
-               "air_time": z(2), "contact_time": z(2), "unloaded_time": z(2)}
+               "air_time": z(2), "contact_time": z(2), "unloaded_time": z(2), "unload_history": z(2, self.hold_steps)}
         return self.resample(mem, torch.arange(B, device=self.device), rand)
 
     def reset_memory(self, mem: dict, ids: torch.Tensor, rand) -> dict:
@@ -314,7 +320,8 @@ class WalkTask:
         if ids.numel() == 0:
             return mem
         mem = {k: v.clone() for k, v in mem.items()}
-        for k in ("swing_peak", "yaw_rate_avg", "velocity_avg", "air_time", "contact_time", "unloaded_time"):
+        for k in ("swing_peak", "yaw_rate_avg", "velocity_avg", "air_time", "contact_time", "unloaded_time",
+                  "unload_history"):
             mem[k][ids] = 0.0
         mem["last_target"][ids] = math.nan
         mem["command_counter"][ids] = 0
@@ -458,17 +465,24 @@ class WalkTask:
         if "air_time" in want:
             low, high = p.air_time_range
             t["air_time"] = f((air_time > low) & (air_time < high)).sum(1) * f(total > 0.2)
-        if "air_time_smooth" in want:       # air_time's stand-in (STAND_INS): the weight a foot has taken off the ground,
-            # 0 while it carries half the robot or more, 1 when the ground carries none of it; air_time's 0.5 s limit
-            # and request gate.  The ground force has a derivative (the plant's contact spring), so the first part of a
-            # step, the weight moving onto the other foot, pays a little more at every newton.  The limit runs on a
-            # clock of its own, the time the foot has carried less than a quarter of the robot: air_time's clock
-            # stops while a foot touches, and a foot resting on the floor without weight would pay for ever (standing
-            # on one leg).  Walking is not touched by it: a swing lasts well under 0.5 s.
+        if "air_time_smooth" in want:       # air_time's stand-in (STAND_INS), per foot:
+            # unload = the weight the foot has taken off the ground: 0 while it carries half the robot or more, 1 when
+            # the ground carries none of it.  The ground force has a derivative (the plant's contact spring), so the
+            # first part of a step, the weight moving onto the other foot, pays a little more at every newton.
+            # Paid is the unload the foot has KEPT over the last hold_steps control steps (their smallest): air_time's
+            # 0.05 s minimum, so rocking the weight from foot to foot pays nothing.  (W5b's first version paid the
+            # unload of the moment, and the optimiser collected it by rocking about 12 times a second.)
+            # air_time's 0.5 s limit counts seconds of unload (unload x dt) since the foot last carried nearly its half
+            # (unload below unload_reset): a swing (unload 1) gets 0.5 s, as in air_time; neither leaning on one foot
+            # nor resting a weightless foot on the floor is paid for ever; a quiet stance keeps its slope.
+            # And air_time's request gate.
             unload = (1.0 - s.contact_force[..., 2] / self.half_weight).clamp(0.0, 1.0)
-            unloaded = torch.where(unload.detach() > 0.5, mem["unloaded_time"] + dt, torch.zeros_like(unload.detach()))
-            new["unloaded_time"] = unloaded
-            t["air_time_smooth"] = (unload * f(unloaded < p.air_time_range[1])).sum(1) * f(total > 0.2)
+            held = torch.cat((mem["unload_history"][..., 1:], unload[..., None]), -1)    # the last hold_steps unloads
+            new["unload_history"] = held
+            u = unload.detach()
+            spent = torch.where(u < p.unload_reset, torch.zeros_like(u), mem["unloaded_time"] + u * dt)
+            new["unloaded_time"] = spent
+            t["air_time_smooth"] = (held.amin(-1) * f(spent < p.air_time_range[1])).sum(1) * f(total > 0.2)
         if "foot_clearance" in want:
             cost = ((s.foot_height - swing_target[:, None]).abs() * foot_speed).sum(1)
             t["foot_clearance"] = cost * f(speed > 0.05) / speed.clamp(min=1.0)
