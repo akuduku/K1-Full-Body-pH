@@ -6,6 +6,15 @@ and torque-speed limit.  Both read the same quantities at the end of a policy st
 only), so a difference between them comes from contact, the motor model or the integrator, not from the bookkeeping.
 
 Walker is the firmware's loop around a backend: ramp the twist, observe, run the policy, decode, step.
+
+Energy is booked at every 1 ms plant step on both (backend.energy_book(), cumulative joules since reset()):
+    bus      the battery's energy, sum_j v_j i_j (joints share the bus: a braking joint feeds the others)
+    copper   sum_j R_j i_j^2
+    motor    the motors' mechanical work sum_j tau_j theta_dot_j (net)
+pH: from the plant's own ledger (supplied, copper; motor = supplied - copper - change of the coils' magnetic energy).
+MuJoCo: an ideal DC motor behind each torque (i = tau / k, R / k^2 = w_max / tau_stall, ph_k1/motors.py), summed
+inside its 1 ms loop.  Sampling the torque once per 20 ms policy step instead misses the current's transients (the
+pH ledger's copper loss was 10-21 % above such samples while walking; Model Based RL docs/EXPERIMENTS.md, P1).
 """
 
 from __future__ import annotations
@@ -136,6 +145,13 @@ class PHBackend:
     def healthy(self) -> bool:
         return bool(torch.isfinite(self.plant.q).all() and torch.isfinite(self.plant.p).all())
 
+    def energy_book(self) -> dict:
+        """Cumulative since reset() [J]: bus, copper, motor (see the module's docstring), from the ledger."""
+        led = self.plant.ledger
+        sup, cu = float(led.supplied[0]), float(led.copper[0])
+        coil = float(self.plant.energy()["coil"][0])
+        return {"bus": sup, "copper": cu, "motor": sup - cu - coil}
+
 
 class MuJoCoBackend:
     name = "MuJoCo"
@@ -157,6 +173,7 @@ class MuJoCoBackend:
         self.substeps = round(self.firmware.policy_dt / h)
         self.lag = round(delay_ms * 1e-3 / h)
         self.k, self.R, self.v_max = mot.k.numpy(), mot.R.numpy(), float(mot.v_max)
+        self.r_over_k2 = self.R / self.k ** 2
         self.tau_max = mot.tau_max.numpy()
         self.kp_np, self.kd_np = self.kp[0].numpy(), self.kd[0].numpy()
         self.feet = [mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_BODY, n) for n in FEET]
@@ -180,6 +197,11 @@ class MuJoCoBackend:
         self.ring = deque([np.array(pose)] * self.lag, maxlen=self.lag + 1)
         self.last_target = torch.as_tensor(pose, dtype=torch.float64)[None]
         self.torque = np.zeros(C.NJ)
+        self.book = np.zeros(3)          # bus, copper, motor [J], summed every plant step
+
+    def energy_book(self) -> dict:
+        """Cumulative since reset() [J]: bus, copper, motor (see the module's docstring)."""
+        return dict(zip(("bus", "copper", "motor"), map(float, self.book)))
 
     def _foot_force(self) -> np.ndarray:
         m, d = self.m, self.d
@@ -218,6 +240,10 @@ class MuJoCoBackend:
             cap = np.minimum(available, self.tau_max)
             d.ctrl[:] = np.clip(tau, -cap, cap)
             mujoco.mj_step(self.m, d)
+            # this step's work: tau . (q_new - q_old) = h tau . v_new (semi-implicit Euler)
+            p = d.ctrl * d.qvel[6:]
+            cu = d.ctrl ** 2 * self.r_over_k2
+            self.book += self.m.opt.timestep * np.array([(p + cu).sum(), cu.sum(), p.sum()])
         self.torque = d.ctrl.copy()
 
     def healthy(self) -> bool:
