@@ -61,6 +61,8 @@ class WalkConfig:
     command_scale: float = 1.0           # x the drawn requests: 0 = stand, 1 = Eric's ranges (the training's curriculum)
     top_speed: float | None = None       # the sprints' top speed; None = WalkParams.top_speed[0]
     fixed_command: tuple | None = None   # (vx, vy, wz): every robot gets this request and nothing else (evaluation)
+    gait_clock: bool = False             # W5c: the network also gets the gait clock (sin, cos; 0 while standing), 77 inputs
+                                         # as the firmware's walk_clock agent (rl/walk/task.py clock)
     obs_noise: dict = field(default_factory=lambda: {"gyro": 0.2, "gravity": 0.05, "joint_pos": 0.01, "joint_vel": 1.5})
     rewards: dict = field(default_factory=lambda: dict(REWARDS))
     params: WalkParams = field(default_factory=WalkParams)
@@ -183,6 +185,9 @@ class WalkEnv(VecEnv):
                                       self._noise(theta + self.encoder_bias, "joint_pos"), self._noise(self.qd, "joint_vel"),
                                       self.actions, command)
         clean = self.contract.observe(self.gyro, g, theta, self.qd, self.actions, command)
+        if self.cfg.gait_clock:             # W5c: the clock after the 75 (77), as the firmware's walk_clock agent
+            clock = self.task.clock(self.mem).to(actor.dtype)
+            actor, clean = torch.cat((actor, clock), -1), torch.cat((clean, clock), -1)
         critic = torch.cat((clean, self.critic_extra), -1)
         return TensorDict({"policy": actor, "critic": critic}, batch_size=[self.num_envs], device=self.device)
 
@@ -272,5 +277,6 @@ class WalkEnv(VecEnv):
 
     def config_dict(self) -> dict:
         d = asdict(self.cfg)
-        d["contract"] = {"agent": "sprint", "gains": C.GAINS, "obs_dim": C.OBS_DIM, "tilt_abort": C.TILT_ABORT}
+        d["contract"] = {"agent": "walk_clock" if self.cfg.gait_clock else "sprint", "gains": C.GAINS,
+                         "obs_dim": C.OBS_DIM + (2 if self.cfg.gait_clock else 0), "tilt_abort": C.TILT_ABORT}
         return d

@@ -128,10 +128,11 @@ def main():
     ap.add_argument("--seed", type=int, default=2026)
     ap.add_argument("--seconds", type=float, default=10.0)
     ap.add_argument("--quiet", action="store_true", help="no pushes, no sensor noise, nominal gains, 20 ms delay")
+    ap.add_argument("--gait-clock", action="store_true", help="a walk_clock policy (W5c): 77 inputs, the gait clock")
     ap.add_argument("--command", type=float, nargs=3, action="append", metavar=("VX", "VY", "WZ"),
                     help="a command to test (repeatable); default: stand, walk 0.5 and 1.0, back, sidestep, turn")
     args = ap.parse_args()
-    cfg = WalkConfig(num_envs=args.num_envs, device=args.device, dtype="float32", seed=args.seed)
+    cfg = WalkConfig(num_envs=args.num_envs, device=args.device, dtype="float32", seed=args.seed, gait_clock=args.gait_clock)
     env = WalkEnv(quiet(cfg) if args.quiet else cfg)
     act = load(args.policy, env)
     print(f"{Path(args.policy).name} on the pH plant ({args.num_envs} robots, {args.seconds:g} s per command"

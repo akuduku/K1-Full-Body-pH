@@ -90,6 +90,43 @@ def test_gait_clock_matches_k1_deploy_walk_clock():
     assert np.allclose(seen[70], (0.0, 0.0))               # 0.18 m/s sideways and forward: under the gate
 
 
+def test_mujoco_loop_clock_matches_training():
+    """The firmware's loop in MuJoCo and on the pH plant (Walker, clock=True) counts the gait clock as the
+    training's WalkTask does, step by step through standing, walking, a request under the gate and a turn."""
+    import torch
+    from rl.walk.task import WalkTask
+
+    task = WalkTask(load_k1(dtype=torch.float64))
+    walker = Walker.__new__(Walker)                    # only the clock: no engine needed
+    from rl.walk.task import WalkParams
+    walker.clock_params, walker.clock_steps = WalkParams(), 0
+    mem = {"gait_phase": torch.zeros(1, dtype=torch.float64)}
+    plan = [(0.0, 0.0, 0.0)] * 3 + [(0.5, 0.0, 0.0)] * 40 + [(0.1, 0.0, 0.0)] * 2 + [(0.0, 0.0, 0.3)] * 5
+    for cmd in plan:
+        obs = np.zeros(C.OBS_DIM, dtype=np.float32)
+        obs[72:75] = np.clip(np.array(cmd), C.TWIST_LOW, C.TWIST_HIGH)
+        mem["commands"] = torch.tensor([cmd], dtype=torch.float64)
+        np.testing.assert_allclose(walker.clock_inputs(obs), task.clock(mem)[0].numpy(), atol=1e-6)
+        mem["gait_phase"] = task.next_phase(mem)
+
+
+def test_walk_env_observes_the_clock():
+    """WalkConfig(gait_clock=True): the actor and the critic see the 75 and the clock's sin, cos (77); the clock runs
+    while the robot is asked to move and starts from (0, 1)."""
+    from rl.walk.env import WalkConfig, WalkEnv, quiet
+
+    env = WalkEnv(quiet(WalkConfig(num_envs=2, device="cpu", dtype="float64", seed=1, gait_clock=True),
+                        fixed_command=(0.5, 0.0, 0.0)))
+    obs = env.get_observations()
+    assert obs["policy"].shape == (2, 77) and obs["critic"].shape[1] == 77 + 15
+    np.testing.assert_allclose(obs["policy"][:, 75:].numpy(), [[0.0, 1.0], [0.0, 1.0]], atol=1e-9)
+    for k in range(1, 4):
+        obs, *_ = env.step(env.contract.home.new_zeros(2, C.NJ))      # zero actions: the home pose
+        angle = 2 * np.pi * k * C.POLICY_DT / 0.46
+        np.testing.assert_allclose(obs["policy"][:, 75:].numpy(), [[np.sin(angle), np.cos(angle)]] * 2, atol=1e-6)
+    assert env.config_dict()["contract"]["obs_dim"] == 77
+
+
 def test_projected_gravity_matches_k1_deploy():
     deploy_sprint()
     from k1_deploy.contract import projected_gravity

@@ -67,9 +67,9 @@ def resolve_policy(name: str | Path) -> Path:
     raise FileNotFoundError(f"no policy {name!r}: not a file, and not in {CHECKPOINTS}")
 
 
-def load_walk_policy(name: str | Path):
-    """A walking policy as a function of one observation (75, float32) to one action (22): TorchScript, .bin or
-    rsl-rl checkpoint."""
+def load_walk_policy(name: str | Path, obs_dim: int = C.OBS_DIM):
+    """A walking policy as a function of one observation (obs_dim, float32: the sprint's 75, or 77 with the gait
+    clock) to one action (22): TorchScript, .bin or rsl-rl checkpoint."""
     path = resolve_policy(name)
     fn = None
     if path.suffix == ".pt":
@@ -87,9 +87,9 @@ def load_walk_policy(name: str | Path):
         def fn(obs):
             return np.asarray(loaded(obs[None]))[0]
     try:
-        out = fn(np.zeros(C.OBS_DIM, dtype=np.float32))
+        out = fn(np.zeros(obs_dim, dtype=np.float32))
     except RuntimeError as exc:
-        raise ValueError(f"{path.name} does not take the sprint's {C.OBS_DIM} inputs") from exc
+        raise ValueError(f"{path.name} does not take {obs_dim} inputs") from exc
     if out.shape != (C.NJ,):
         raise ValueError(f"{path.name} gives {out.shape} outputs, the sprint needs ({C.NJ},)")
     return fn
@@ -225,10 +225,14 @@ class MuJoCoBackend:
 
 
 class Walker:
-    """The firmware's loop for one robot: ramp the twist, observe, run the policy, decode, step."""
+    """The firmware's loop for one robot: ramp the twist, observe, run the policy, decode, step.  clock: the
+    walk_clock agent (W5c), the gait clock's sin and cos after the 75 from a step counter, as its firmware draft."""
 
-    def __init__(self, backend, policy):
-        self.backend, self.policy = backend, policy
+    def __init__(self, backend, policy, clock: bool = False):
+        self.backend, self.policy, self.clock = backend, policy, clock
+        from rl.walk.task import WalkParams
+
+        self.clock_params = WalkParams()
         self.reset()
 
     def reset(self, pose: np.ndarray | None = None) -> None:
@@ -238,6 +242,15 @@ class Walker:
         self.target = self.backend.home.copy() if pose is None else np.array(pose)
         self.reading = self.backend.read()
         self.fell = False
+        self.clock_steps = 0                # policy steps since the gait clock started (walk_clock's start())
+
+    def clock_inputs(self, obs: np.ndarray) -> np.ndarray:
+        """walk_clock's two inputs for this step, from the twist the policy sees (obs 72..74), and the counter on."""
+        p = self.clock_params
+        on = float(np.hypot(obs[72], obs[73]) + abs(obs[74])) > p.clock_gate
+        phase = (self.clock_steps * C.POLICY_DT / p.gait_period) % 1.0
+        self.clock_steps = self.clock_steps + 1 if on else 0
+        return np.array((np.sin(2 * np.pi * phase), np.cos(2 * np.pi * phase)) if on else (0.0, 0.0), dtype=np.float32)
 
     def tick(self, want, push: np.ndarray | None = None) -> Reading:
         """One 20 ms policy step towards the requested twist `want` (3). Once fallen, the targets freeze."""
@@ -245,6 +258,8 @@ class Walker:
         if not self.fell:
             self.twist = C.ramp_twist(self.twist, want)
             obs = C.observe(r.gyro, C.projected_gravity(r.quat), r.theta, r.qd, self.last_action, self.twist)
+            if self.clock:
+                obs = np.concatenate((obs, self.clock_inputs(obs)))
             self.last_action = self.policy(obs)
             self.target = C.decode(self.last_action)
         self.backend.step(self.target, push)

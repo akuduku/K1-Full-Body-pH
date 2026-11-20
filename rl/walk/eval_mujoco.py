@@ -60,9 +60,11 @@ def main():
     ap.add_argument("--delay-ms", type=float, default=20.0)
     ap.add_argument("--push", type=float, default=0.0, help="sideways trunk velocity change every 4 s [m/s]")
     ap.add_argument("--command", type=float, nargs=3, action="append", metavar=("VX", "VY", "WZ"))
+    ap.add_argument("--gait-clock", action="store_true",
+                    help="the walk_clock agent (W5c): the policy takes 77 inputs, the 75 and the gait clock's sin, cos")
     args = ap.parse_args()
     backend = (MuJoCoBackend if args.physics == "mujoco" else PHBackend)(delay_ms=args.delay_ms)
-    walker = Walker(backend, load_walk_policy(args.policy))
+    walker = Walker(backend, load_walk_policy(args.policy, C.OBS_DIM + (2 if args.gait_clock else 0)), clock=args.gait_clock)
     print(f"{Path(args.policy).name} in {backend.name} (one robot, {args.seconds:g} s per command, delay {args.delay_ms:g} ms, "
           f"push {args.push:g} m/s)")
     fell = 0

@@ -25,13 +25,17 @@ from rl.walk import contract as C  # noqa: E402
 HIDDEN_DIMS = E.HIDDEN_DIMS
 
 
-def check_shapes(tensors) -> None:
-    """The firmware loads only the standard 512-256-128 stack on a 75-dim sprint observation."""
-    E.check_shapes(tensors, C.OBS_DIM, C.NJ, HIDDEN_DIMS, agent="the sprint")
+AGENTS = {C.OBS_DIM: "the sprint", C.OBS_DIM + 2: "the walk_clock"}     # 77: the 75 and the gait clock (W5c)
 
 
-def export_bin(checkpoint, out_path: str | Path) -> Path:
-    return E.export_bin(checkpoint, out_path, C.OBS_DIM, C.NJ, HIDDEN_DIMS, agent="the sprint")
+def check_shapes(tensors, obs_dim: int = C.OBS_DIM) -> None:
+    """The firmware loads only the standard 512-256-128 stack on the agent's observation: the sprint's 75, or 77
+    for the walk_clock agent."""
+    E.check_shapes(tensors, obs_dim, C.NJ, HIDDEN_DIMS, agent=AGENTS[obs_dim])
+
+
+def export_bin(checkpoint, out_path: str | Path, obs_dim: int = C.OBS_DIM) -> Path:
+    return E.export_bin(checkpoint, out_path, obs_dim, C.NJ, HIDDEN_DIMS, agent=AGENTS[obs_dim])
 
 
 def bin_policy(mats):
@@ -43,10 +47,11 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("checkpoint")
     ap.add_argument("out", nargs="?", default=None, help="default: deploy_<iteration>.bin next to the checkpoint")
+    ap.add_argument("--gait-clock", action="store_true", help="a walk_clock policy (W5c): 77 inputs")
     a = ap.parse_args()
     ck = Path(a.checkpoint)
     out = Path(a.out) if a.out else ck.with_name(ck.stem.replace("model", "deploy") + ".bin")
-    print(f"wrote {export_bin(ck, out)}")
+    print(f"wrote {export_bin(ck, out, C.OBS_DIM + (2 if a.gait_clock else 0))}")
 
 
 if __name__ == "__main__":
